@@ -8,7 +8,7 @@ Scope: greenfield real-estate intelligence monorepo
 
 The repository root anchors paths in this document; `/specs` means a directory inside the repository, not the operating system root. The project name and slug reflect the user’s requested rename to Property Focus.
 
-This plan follows the supplied `master-plan-format` methodology, with the user's `/specs` path override. The user's architecture decision register ([architecture-decisions.md](architecture-decisions.md), 56 confirmed decisions cited here as D1–D56), current architecture inventory and the retrieved planning conversation define the confirmed inputs. Recommendations below fill implementation gaps; they do not imply prior approval of details the register does not record. Update Status to confirmed after design review, in-progress when implementation starts, and complete after the final release gates pass. Draft status does not mean the software exists.
+This plan follows the supplied `master-plan-format` methodology, with the user's `/specs` path override. The user's architecture decision register ([architecture-decisions.md](architecture-decisions.md), 56 confirmed decisions cited here as D1–D56, plus ten cross-cutting principles) is authoritative: where this plan and the register disagree, the register wins. The BTL traceability table maps every decision to the sections, requirements and phases that implement it. Recommendations below fill implementation gaps; they do not imply prior approval of details the register does not record. Update Status to confirmed after design review, in-progress when implementation starts, and complete after the final release gates pass. Draft status does not mean the software exists.
 
 ---
 
@@ -18,7 +18,7 @@ This plan follows the supplied `master-plan-format` methodology, with the user's
 
 You receive real-estate listings through MLS emails and inspect listing pages to decide which homes deserve attention. An MLS, or multiple listing service, distributes listing information to authorized participants. TheMLS is the first supported listing source.
 
-A **property** represents a physical home or parcel. A **listing** represents one marketing episode for that property. A relisting can change price, agent, or source identifier without creating a new home.
+A **property** represents a physical home or parcel. A **listing** represents one marketing episode for that property. A relisting can change price, agent, or source identifier without creating a new home (D4).
 
 ```mermaid
 flowchart LR
@@ -28,7 +28,7 @@ flowchart LR
     Notes --> Choice[Buyer decides whether to investigate]
 ```
 
-The proposed product records those observations with their sources and compares homes against your preferences. A **tenant** represents a private household or buying team; members share preferences and offer scenarios within that boundary.
+The proposed product acts as a personal real-estate analyst. It interprets every qualifying property for you: why it fits, why it does not, what is concerning, and whether it is worth seeing (D1). A **tenant** represents a private household or buying team. In V1 each tenant shares one active household preference profile (D5).
 
 ### Two products for residential buyers
 
@@ -36,19 +36,29 @@ A Homebuyer asks whether a property fits daily life and what to check on a visit
 
 | Experience | Onboarding and feed | Property page and next action |
 |---|---|---|
-| Homebuyer · `/homebuyer` | Start a home search with household needs and budget. Rank homes by fit. | Lead with layout, location, affordability and unknowns. Shortlist a home or flag a question for a visit. |
+| Homebuyer · `/homebuyer` | Run the household preference interview, then start a home search with budget and geography. Rank homes by fit. | Lead with fit, layout, location, affordability and unknowns. Shortlist a home or flag a question for a visit. |
 | Investor · `/investor` | Start an acquisition search with financing assumptions and income criteria. Rank by the search's investment criteria. | Lead with units, occupancy, documented rents, expenses and projected cash flow. Compare purchase scenarios and their binding constraints. |
 
-A search belongs to a household or buying team. One account can keep a home search and an investment search open at the same time. The chosen experience controls presentation. The strategy saved with the search determines which assumptions to apply.
+A **search subscription** is an entry mechanism, not the main product object (D17). It holds a source, search criteria and a notification policy. It also carries an acquisition strategy and the criteria specific to that strategy. The property remains the object you inspect.
+
+The two experiences arrived after the register fixed one household profile per tenant. We reconcile them in layers. The tenant keeps one active **PreferenceProfile**: household needs, lifestyle goals, destinations and shared tradeoffs. Each subscription layers its strategy's budget, financing assumptions and investment criteria on that profile.
+
+| Layer | Count per tenant | Holds |
+|---|---|---|
+| PreferenceProfile | One active (D5) | Lifestyle goals, preferences and hard requirements about the home, destinations, tradeoffs, examples |
+| SearchSubscription | Many | Source, geography and listing criteria, notification policy, strategy (`owner_occupancy`, `live_in_and_rent`, `rental_hold`), budget, financing and investment criteria |
 
 ```mermaid
 flowchart LR
-    H[Homebuyer pages] --> S[Selected search and strategy]
+    H[Homebuyer pages] --> S[Search subscription and strategy]
     I[Investor pages] --> S
-    S --> M[Shared matching and scenario calculations]
+    P[Household PreferenceProfile] --> M[Shared evaluation and scenario calculations]
+    S --> M
     E[Authorized property and unit evidence] --> M
-    M --> R[Search-specific results]
+    M --> R[Subscription-specific evaluations]
 ```
+
+We recommend that a `rental_hold` subscription skip the household Lifestyle fit dimension, because a household's commute does not bear on a rental's merit. The Risks table asks the user to confirm this rule.
 
 ### The problem
 
@@ -101,9 +111,9 @@ sequenceDiagram
 
 ### The design
 
-We recommend a Python modular monolith with separate runtime adapters. Engineers keep domain rules in one application layer and deploy API handlers, background tasks, and browser workers as workload needs dictate. This limits distributed-system overhead while preserving the chosen AWS deployment path.
+We recommend a Python modular monolith with separate runtime adapters (D18). Engineers keep domain rules in one application layer and deploy API handlers, short-lived tasks and browser tasks as workload needs dictate. This limits distributed-system overhead while preserving the chosen AWS deployment path.
 
-The application layer coordinates use cases. Domain modules implement identity, claim resolution, scoring, valuation, and offer calculations without importing FastAPI, AWS clients, or browser code.
+The application layer coordinates use cases. Domain modules implement identity, claim resolution, evaluation, valuation and offer calculations without importing FastAPI, AWS clients, or browser code.
 
 ```mermaid
 flowchart TB
@@ -111,50 +121,103 @@ flowchart TB
     Agent[MCP client] --> MCP[MCP adapter]
     REST --> App[Python application layer]
     MCP --> App
-    Jobs[Background task adapters] --> App
+    Tasks[On-demand task invocations] --> App
     App --> Domain[Domain rules]
     App --> DB[Postgres]
     App --> Objects[Evidence object storage]
-    App --> Ports[Source and AI provider adapters]
+    App --> Ports[Source, enrichment and model provider adapters]
 ```
 
-Engineers generate the frontend's RTK Query client from FastAPI's OpenAPI schema. MCP exposes the same application use cases through a parallel adapter; MCP calls do not route through REST, and neither adapter duplicates business rules. Users receive the same authorization checks and result semantics through both surfaces.
+Engineers generate the frontend's RTK Query client from FastAPI's OpenAPI schema (D29). MCP exposes the same application use cases through a parallel adapter; MCP calls do not route through REST, and neither adapter duplicates business rules. Users receive the same authorization checks and result semantics through both surfaces.
+
+The REST API is resource-oriented (D30). Reads and edits use resources such as `GET /properties/{id}/intelligence` and `PATCH /preferences/{id}`. Workflows use explicit action endpoints such as `POST /properties/{id}/deep-analysis` and `POST /properties/{id}/reanalyze`.
 
 We recommend serving MCP over the streamable HTTP transport at `/mcp`, beside the REST API, so remote agents need no local process. MCP clients sign in through Cognito with the same authorization code and PKCE flow as the web app, shown in the sign-in diagram under Deployment, authentication, and operations. Each MCP request then carries a bearer access token; one token check maps it to the internal application user and tenant for both adapters (D28). The MCP server calls application services directly and never proxies HTTP into FastAPI (D29).
 
-#### Ingestion and browser enrichment
+#### Property pipeline
 
-The first acquisition path polls a dedicated mailbox over IMAP every 15 to 30 seconds. The user chose IMAP polling because it is simple and avoids coupling ingestion to Gmail-specific APIs; the email ingress stays pluggable so SES, Gmail or an inbound-mail webhook can replace it later (D22). Workers preserve raw email before parsing, record malformed messages for review, and checkpoint mailbox progress after durable intake. Mail delivery and job delivery can repeat, so engineers enforce deduplication at both boundaries.
+Property understanding happens once per property and serves every tenant (D7). Sources emit observations; normalization and identity resolution follow; deterministic hard filters drop properties no active subscription could accept (D3); intelligence runs on the survivors; tenant evaluation comes last.
 
 ```mermaid
 flowchart LR
-    Mailbox[Dedicated mailbox] --> Intake[Email intake]
-    Intake --> Raw[Raw email evidence]
-    Raw --> Parse[TheMLS email parser]
-    Parse --> Identity[Property and listing resolution]
-    Identity --> Queue[Enrichment job]
-    Queue --> Browser[TheMLS browser worker]
-    Browser --> Snapshot[Listing snapshot and media evidence]
+    Sources[Property sources] --> Obs[Source observations]
+    Obs --> Identity[Normalize and resolve identity]
+    Identity --> Filter[Deterministic hard pre-filter]
+    Filter -->|Survives| Baseline[Baseline analysis]
+    Filter -->|Rejected by every subscription| Stop[Listing facts only]
+    Baseline --> Eval[Tenant evaluation]
+    Eval --> Trigger{Deep research trigger}
+    Trigger -->|AUTO, MANUAL or EXPERIMENT| Deep[Deep research]
+    Deep --> Eval
 ```
 
-Browser workers use Playwright with one persistent, encrypted TheMLS session per source credential and hold a credential lease while they use or refresh it; account-level concurrency starts at one (D23). The session moves through four lifecycle states; reauthentication pauses dependent jobs and notifies an administrator, who holds the `operator` role, instead of looping through login attempts.
+A **property source** is any adapter that emits source observations: the MLS mailbox, the TheMLS browser, a manual add by URL or address, an uploaded document (D2, D17). Sources never write canonical properties. Adding Zillow, Redfin or a RESO feed later means adding a source, not changing the property domain.
+
+The pre-filter evaluates listing facts against the hard requirements of every active subscription. A property survives when at least one subscription returns pass or unknown; unknown never counts as false (D7). Funnel stages carry versions so engineers can run a candidate stage in shadow beside the current one (D3).
+
+#### Execution model: on-demand tasks
+
+The system spends most of its time idle, so it runs no always-on worker fleet (D26). Each unit of work is a short-lived task invocation: Lambda first in AWS, on-demand Fargate RunTask for browser or heavy work. Step Functions invokes those tasks directly; SQS buffers bursts and applies backpressure but does not define the execution model (D21, D26).
+
+DigitalOcean dogfood emulates the same model with on-demand processes and containers. A scheduler daemon starts short-lived task processes and does no business work itself. The always-on services are Postgres, MiniStack, the API and MCP services (D27), the reverse proxy, the observability stack and that scheduler.
+
+The register sets IMAP polling every 15 to 30 seconds (D22). Neither EventBridge Scheduler nor cron fires faster than once a minute, so we recommend one short-lived `imap-poll` invocation per minute. It polls at 20-second intervals (configurable within 15 to 30), stops starting polls after 45 seconds, and exits. A Postgres advisory lock prevents overlapping invocations.
+
+```mermaid
+sequenceDiagram
+    participant Sched as Scheduler (EventBridge or dogfood daemon)
+    participant Poll as imap-poll task
+    participant Mail as Dedicated mailbox
+    participant DB as Postgres
+    participant Launch as Task launcher
+    Sched->>Poll: Start once per minute
+    Poll->>DB: Take advisory lock
+    loop Every 20 s until 45 s elapsed
+        Poll->>Mail: Fetch new UIDs
+        Poll->>DB: Store raw email, intake row and outbox event
+    end
+    Poll->>DB: Release lock and exit
+    DB-->>Launch: Outbox event after commit
+    Launch->>Launch: Start parse task (Lambda, Fargate or dogfood process)
+```
+
+The intake task only stores raw mail and enqueues work. Parsing, identity resolution, enrichment and analysis each run as their own on-demand task.
+
+#### Ingestion and browser enrichment
+
+The first acquisition path polls a dedicated mailbox over IMAP. The user chose IMAP polling because it is simple and avoids coupling ingestion to Gmail-specific APIs; the `EmailIngress` port stays pluggable so SES, Gmail or an inbound-mail webhook can replace it later (D22). Intake preserves the original `.eml` as immutable evidence before parsing, records malformed messages for review, and checkpoints mailbox progress after durable intake. Email ingestion uses no LLM. Mail delivery and task delivery can repeat, so engineers enforce deduplication at both boundaries (D54).
+
+```mermaid
+flowchart LR
+    Mailbox[Dedicated mailbox] --> Intake[imap-poll intake]
+    Intake --> Raw[Raw .eml evidence]
+    Raw --> Parse[TheMLS email parser task]
+    Parse --> Identity[Property and listing resolution]
+    Identity --> Enrich[Enrichment task by capability]
+    Enrich --> Browser[TheMLS browser task]
+    Browser --> Obs[Source observation and media evidence]
+```
+
+Enrichers advertise **capabilities** rather than vendor names (D11). The TheMLS browser advertises `LISTING`, `PHOTOS`, `REMARKS` and `LISTING_HISTORY`; later providers advertise `SALE_HISTORY`, `ASSESSOR`, `PERMITS` and the rest. A capability registry names a primary provider and, where useful, a secondary and a shadow provider.
+
+Browser tasks use Playwright with one persistent, encrypted TheMLS profile on the dogfood host (D23). Each browser task runs in an on-demand container that mounts the profile and holds a credential lease; account-level concurrency starts at one. The session moves through four lifecycle states; reauthentication pauses dependent work and notifies an administrator, who holds the `operator` role, instead of looping through login attempts.
 
 ```mermaid
 stateDiagram-v2
     [*] --> HEALTHY
-    HEALTHY --> SESSION_EXPIRING: Worker detects near expiry
+    HEALTHY --> SESSION_EXPIRING: Task detects near expiry
     SESSION_EXPIRING --> HEALTHY: Lease holder refreshes session
     SESSION_EXPIRING --> AUTH_REQUIRED: Login or MFA challenge
     HEALTHY --> AUTH_REQUIRED: Session rejected
     AUTH_REQUIRED --> HEALTHY: Administrator completes login or MFA and resumes
     HEALTHY --> BLOCKED: Source blocks the account
     BLOCKED --> HEALTHY: Administrator clears block and resumes
-    note right of AUTH_REQUIRED: Pause dependent jobs, notify administrator once
+    note right of AUTH_REQUIRED: Pause dependent work, notify administrator once
 ```
 
-The browser starts as a container worker on DigitalOcean. AWS uses Fargate for persistent-session or long browser jobs. Engineers may use Lambda for short, measured browser tasks after a compatibility test, but must not require a browser session to survive a Lambda invocation. Ordinary Lambda functions have a 900-second invocation limit, which supports a bounded-task design [R2].
+AWS runs browser tasks on Fargate RunTask and stores the encrypted profile outside the container. Engineers may use Lambda for short, measured browser tasks after a compatibility test, but must not require a browser session to survive a Lambda invocation. Ordinary Lambda functions have a 900-second invocation limit, which supports a bounded-task design [R2].
 
-Workers accept listing URLs from an allowlisted TheMLS host set, block private-network destinations and unsafe redirects, and enforce media size limits. Source pages and emails are untrusted input. AI adapters treat their contents as evidence, with no authority to issue tools or alter application instructions.
+Browser tasks accept listing URLs from an allowlisted TheMLS host set, block private-network destinations and unsafe redirects, and enforce media size limits. Source pages and emails are untrusted input. AI adapters treat their contents as evidence, with no authority to issue tools or alter application instructions.
 
 #### Identity, history, and evidence
 
@@ -165,15 +228,16 @@ Engineers use internal UUIDs for properties and listings. They scope external id
 | Concept | Meaning |
 |---|---|
 | Property | Stable identity for a home or parcel grouping |
-| Listing | Source-specific marketing episode |
-| Snapshot | Immutable observation of a listing at a point in time |
-| Claim | Typed assertion about a subject, supported by evidence |
-| Evidence | Original content or a derived artifact with provenance |
-| Intelligence profile | Versioned resolved view of claims for a subject |
+| Listing | Source-specific marketing episode with current state and history |
+| SourceObservation | Immutable record of what one source reported at one time |
+| Claim | Immutable typed assertion about one attribute of a subject, supported by evidence |
+| Evidence asset | Content-addressed original or derived artifact with provenance |
+| AnalysisRun | One versioned analyzer or enricher execution and its outputs |
+| PropertyEvaluation | One tenant subscription's versioned assessment of one property |
 
 ```mermaid
 flowchart LR
-    Snapshot[Listing snapshot] --> Candidates[Identity candidates]
+    Obs[Source observation] --> Candidates[Identity candidates]
     Candidates --> Strong{Strong identity match?}
     Strong -->|Yes| Link[Link to existing property]
     Strong -->|No match| New[Create provisional property]
@@ -182,132 +246,110 @@ flowchart LR
     Audit --> Link
 ```
 
-A source-scoped listing ID identifies a listing episode unless source behavior proves otherwise. County plus assessor parcel number provides a property anchor; normalized address, unit, and coordinates supply supporting signals. Workers preserve candidate links during uncertainty. Operators can reverse a merge using retained aliases and provenance.
+Identity resolution prefers the parcel identifier (county plus assessor parcel number), then normalized address with coordinates, then source-specific IDs (D4). Each link carries a confidence. A source-scoped listing ID identifies a listing episode unless source behavior proves otherwise. Ambiguous cases keep their candidate links, and operators can reverse a merge using retained aliases and provenance.
 
-We recommend Postgres for transactional relationships and JSONB for versioned, heterogeneous payloads. Engineers keep tenant IDs, subject IDs, timestamps, status, foreign keys, and uniqueness constraints in relational columns. JSONB holds claim values, source payloads, and model details; it does not replace schema validation or referential integrity.
+Postgres holds the relational core: Property, Listing, Tenant, SourceObservation, Claim, AnalysisRun and PropertyEvaluation (D24). JSONB holds evolving analyzer payloads and claim values until an attribute earns a first-class column. Relational current state stays authoritative; we do not use pure event sourcing (D25). A price change commits four writes in one transaction.
 
-Workers store raw `.eml`, HTML, screenshots, documents, and media in content-addressed object storage. They record object version, digest, content type, capture time, source locator, and access scope in Postgres. Writers cannot overwrite evidence; corrections create new claims. AWS uses versioned S3 with deny-overwrite/delete policies and an approved Object Lock retention policy for evidence classes that permit it [R6]. DigitalOcean dogfood must pass write-once and restore tests; an emulator alone does not establish durable immutability.
+```mermaid
+sequenceDiagram
+    participant Task as Parse task
+    participant DB as Postgres transaction
+    participant Pub as Outbox publisher
+    Task->>DB: Update listing current price
+    Task->>DB: Insert listing history row
+    Task->>DB: Insert domain event
+    Task->>DB: Insert outbox event
+    DB-->>Task: Commit
+    Pub->>DB: Read committed outbox event
+    Pub->>Pub: Publish to queue or workflow
+```
 
-#### Claims and selective human verification
+Evidence lives in content-addressed object storage keyed by SHA-256 (D44). Identical bytes from repeated listing versions deduplicate to one object where source rights permit. Postgres records hash, media type, object key, source URL, provider, capture time and property and listing references. Writers cannot overwrite evidence; corrections create new claims. AWS uses versioned S3 with deny-overwrite/delete policies and an approved Object Lock retention policy for evidence classes that permit it [R6]. DigitalOcean dogfood must pass write-once and restore tests; an emulator alone does not establish durable immutability.
 
-A claim records a value, the ontology field that gives it meaning, and the evidence that supports it. An **ontology** is the versioned catalog of those field meanings, types, units, and allowed values. Confidence describes an assessment method's uncertainty; it does not transform an inference into a verified fact.
+#### Ontology and claims
+
+An **ontology** is the versioned catalog of property attributes: their meaning, type, unit, allowed values and resolution rule. Postgres stores it as immutable versions in `ontology_versions` and `ontology_attributes` (D33). Seed definitions live as files under `/ontology` and load into the database, but the database copy is canonical, so ontology changes need no application deployment.
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRAFT: Load seed or edit
+    DRAFT --> ACTIVE: Publish after validation
+    ACTIVE --> RETIRED: Successor published
+    RETIRED --> [*]
+    note right of ACTIVE: Exactly one ACTIVE version; analysis runs record the version they used
+```
+
+Executable behavior stays in code. An attribute names a resolution rule from a code registry and passes scalar parameters; JSONB never holds expressions or a rule language (D33).
+
+V1 starts rich, because re-analyzing every property when a new household cares about a skipped feature costs more than extracting a broad profile once (D32). The target is roughly 75 to 150 standardized attributes plus extensible observations.
+
+| Category group | Example coverage |
+|---|---|
+| Structure, rooms, layout | Living area, bedrooms, primary-suite location, open plan, single-level living |
+| Indoor/outdoor, yard, garage | Indoor-outdoor flow, usable yard area, privacy, garage spaces, EV readiness |
+| Condition, kitchen, architecture | Overall condition, renovation era, kitchen quality, architectural style |
+| Location and traffic | Walkability, parks, street traffic level, cul-de-sac status (D42) |
+| Risks, development potential | Flood and fire zones, ADU potential, lot split potential |
+
+A **claim** is an immutable assertion: property, attribute, value, provider, source type, observation time, confidence and evidence (D12). Every claim points at durable evidence: a photo, an image or floorplan region, an MLS text span, an assessor or permit record, or a provider response (D35). A resolver then picks the current best value per attribute under that attribute's rule. List price prefers the current listing; parcel ID prefers the assessor.
+
+Every resolved value carries one of four statuses (D7).
+
+| Status | Meaning |
+|---|---|
+| `OBSERVED` | A source or person reported the value directly |
+| `INFERRED` | An analyzer derived it from evidence, with confidence |
+| `UNKNOWN` | No usable claim exists; never treated as false |
+| `CONFLICTING` | Claims disagree and the rule cannot settle it |
+
+Staleness is a separate property of a value, tracked by invalidation (D13), not a fifth status. Confidence describes an analyzer's uncertainty; it does not turn an inference into an observation.
 
 ```mermaid
 flowchart LR
     Evidence[Evidence] --> Analyzer[Analyzer]
     Analyzer --> Claims[Candidate claims]
+    Human[Human correction claim] --> Resolver
     Claims --> Resolver[Deterministic claim resolver]
-    Resolver --> Conflict{Conflict or decision impact?}
-    Conflict -->|Review needed| Human[Human verification queue]
-    Conflict -->|No| Profile[Intelligence profile]
-    Human --> Correction[Audited verification claim]
-    Correction --> Resolver
+    Resolver --> VOI{High value of information?}
+    VOI -->|Yes| Ask[Verification question]
+    VOI -->|No| Profile[Intelligence profile]
+    Ask --> Human
 ```
 
-The resolver retains competing claims and selects a display value under a versioned policy. It considers source authority, observation time, verification status, and field semantics. A newer marketing description does not erase an assessor record; a field-specific rule decides whether either source supports the question.
+Human corrections become claims with high authority for subjective or visible attributes, and the original AI output stays (D36). A human claim does not override an official parcel or legal fact without supporting evidence. The system asks people to verify only when the answer could change a decision: priority equals uncertainty times preference importance times potential score impact (D37). After a tour it asks a few high-value questions, not a checklist.
 
-Operators review identity ambiguity, source conflicts, low-confidence high-impact claims, and user corrections. Review effort follows impact: an uncertain hard requirement deserves attention before a decorative description. The product labels verified, inferred, disputed, stale, and unknown values and links users to accessible evidence.
+#### Analysis tiers
 
-#### Reusable intelligence and tenant privacy
-
-Engineers separate property facts, location context, and market context from each tenant's preferences. A location profile describes a spatial scope such as a road segment or neighborhood; a market profile describes an area, property class, and time window. Each profile declares freshness and provenance.
+Every surviving property receives a baseline **B-level** analysis. Conditional **C-level** deep research runs for roughly the top 20 to 30 percent of properties, for anomaly and opportunity cases, and on manual request (D1, D6). A property becomes usable as soon as listing facts resolve; deep research adds to it later (D53).
 
 ```mermaid
 flowchart LR
-    Property[Property intelligence] --> Match[Tenant matching]
-    Location[Location intelligence] --> Match
-    Market[Market intelligence] --> Valuation[Valuation distribution]
-    Property --> Valuation
-    Preferences[Tenant preferences] --> Match
-    Match --> Strategy[Tenant offer strategy]
-    Valuation --> Strategy
-    Constraints[Tenant financial constraints] --> Strategy
+    Base[Baseline analysis complete] --> Eval[Evaluations for active subscriptions]
+    Eval --> Rank{Overall fit in subscription top quartile?}
+    Eval --> Anom{Anomaly or opportunity rule?}
+    User[Member request] --> Manual[MANUAL trigger]
+    Harness[Evaluation harness] --> Exp[EXPERIMENT trigger]
+    Rank -->|Yes| Auto[AUTO trigger]
+    Anom -->|Yes| Auto
+    Auto --> Deep[Deep research run]
+    Manual --> Deep
+    Exp --> Deep
 ```
 
-Reuse depends on source rights. Engineers may share a canonical property identifier across tenants, but they must scope evidence and claims to the tenants or entitlement groups allowed to use them. A household's offer ceiling, private notes, source credentials, and feedback remain tenant-private. A cached result must include its entitlement scope in the cache key.
+Each trigger records its type (`AUTO`, `MANUAL` or `EXPERIMENT`), the trigger strategy and version, and its reasons (D6). The default strategy fires when a property's overall fit reaches the subscription's top quartile over a trailing 30 days, which lands inside the register's 20 to 30 percent band. Anomaly rules cover a price drop of 5 percent or more, a `CONFLICTING` hard-requirement attribute, and, once valuation exists, a list price below the valuation's 10th percentile. `EXPERIMENT` triggers let the evaluation harness deep-research rejected properties to measure the funnel.
 
-For street quality, analyzers combine road classification, traffic data where available, map position, and user observations. The product distinguishes measured traffic from a quiet-street inference. Protected demographic characteristics and proxies for steering do not enter suitability scores.
+Deep research results are property intelligence, so they serve every authorized tenant. Budgets attach to tiers, not analyzers (D56).
 
-#### Preferences, hard filters, and scoring
+#### Analyzers and model providers
 
-A preference revision freezes hard requirements, soft weights, missing-data policy, and financial constraints. Users can inspect why a home passed, failed, or needs verification. Engineers calculate eligibility before ranking and keep LLM prose outside the scoring function.
+We use specialized analyzers instead of one giant multimodal prompt (D14). Each analyzer reads cached evidence, emits claims for a fixed set of ontology attributes, and records its model, prompt and analyzer versions with cost, latency, tokens and confidence.
 
-```mermaid
-flowchart LR
-    Facts[Resolved facts and freshness] --> Filter[Hard requirements]
-    Revision[Preference revision] --> Filter
-    Filter --> State{Eligibility}
-    State -->|Pass| Score[Deterministic weighted score]
-    State -->|Unknown| Pending[Needs verification]
-    State -->|Fail| Excluded[Excluded with reasons]
-    Score --> Explain[Fit breakdown and evidence links]
-    Pending --> Explain
-    Excluded --> Explain
-```
+| Tier | First set (phase 3) | Later, each with golden labels and an evaluation report |
+|---|---|---|
+| Baseline | TextAnalyzer, PhotoAnalyzer, ConditionAnalyzer, KitchenAnalyzer | IndoorOutdoorAnalyzer, YardAnalyzer, GarageAnalyzer |
+| Deep | FloorplanAnalyzer, LayoutAnalyzer | NaturalLightAnalyzer, PrivacyAnalyzer, GuestSuiteAnalyzer |
 
-We recommend three-valued hard-filter logic: pass, fail, or unknown. Unknown facts cannot satisfy a hard requirement. Users may include unknown homes in a review feed, but the interface keeps them separate from confirmed matches.
-
-For soft criteria, engineers use versioned utility functions bounded from zero to one. The score uses a fixed denominator across configured criteria; unknown values contribute zero pending verification, and the UI shows a separate coverage measure. This avoids inflating a home's rank because it has less evidence. Users may select a different policy through an explicit preference revision.
-
-#### Buyer strategy
-
-Choose among owner occupancy, living in one unit and renting the others, and holding the property for rental income. For a live-in duplex search, the buyer can require a unit available at closing. A lease on the other unit supports a rent claim for that unit. If the closing-date availability is unknown, show the home in the verification feed.
-
-#### Valuation and offer strategy
-
-A valuation describes a price distribution at a specific time, with comparable sales, adjustments, assumptions, and uncertainty. Engineers start with an explainable comparable-sales baseline and evaluate calibration before adding model complexity. Sparse or stale comps produce an abstention or a wide interval with a low-support label.
-
-```mermaid
-flowchart LR
-    Comps[Eligible comparable sales] --> Baseline[Valuation baseline]
-    Facts[Property facts] --> Baseline
-    Baseline --> Range[Price distribution and support]
-    Range --> Scenarios[Offer scenario calculator]
-    Buyer[Tenant budget and preferences] --> Scenarios
-    Scenarios --> Review[Buyer reviews assumptions and walk-away ceiling]
-```
-
-Keep the market-value estimate tied to the property, comparable sales and valuation date. Underwriting answers a different question: how much cash remains for this buyer after operating expenses, reserves and debt payments? Record the period and source for each input. Rent due under a lease, cash collected and an agent's projected rent can differ. Label each basis and show missing inputs before presenting a total.
-
-Offer strategy combines valuation uncertainty with tenant budget, financing, repair reserves, and risk tolerance. It can compare scenarios and calculate a walk-away ceiling without asserting a seller's acceptance probability when no calibrated model supports one. The product does not submit offers or negotiate on behalf of a user.
-
-#### Orchestration and partial results
-
-AWS uses Step Functions Standard for multi-step analysis, SQS for buffered work, and EventBridge for schedules and domain-event routing. Engineers keep state-machine payloads small by passing IDs and evidence references. Each task commits its result and outbox event in one database transaction; an outbox publisher bridges the database and queue.
-
-```mermaid
-stateDiagram-v2
-    [*] --> queued
-    queued --> running
-    running --> complete: Required components succeed
-    running --> partial: Usable output with missing components
-    running --> waiting_for_user: Source login or verification needed
-    running --> failed: No usable output or terminal defect
-    waiting_for_user --> queued: Authorized resume
-    partial --> queued: Targeted retry
-    failed --> queued: Operator retry after correction
-    queued --> cancelled: User cancellation
-    running --> cancelled: Cooperative cancellation
-```
-
-Step Functions Standard supplies workflow execution semantics [R1], but engineers still protect task side effects against retries, queue redelivery, and operator replay. Idempotency keys include task kind, subject, source version, analyzer version, and relevant preference revision. A partial result lists missing components and their failure classes; it never presents stale values as fresh.
-
-```mermaid
-sequenceDiagram
-    participant Flow as Analysis workflow
-    participant Property as Property analysis
-    participant Location as Location analysis
-    participant Result as Result assembler
-    Flow->>Property: Analyze evidence
-    Flow->>Location: Enrich location
-    Property-->>Result: Usable property profile
-    Location-->>Result: Retry budget exhausted
-    Result-->>Flow: Partial profile with missing-location reason
-```
-
-#### AI providers and evaluation
-
-Engineers define a provider-independent inference request with capability, schema, evidence references, limits, and model policy. Adapters return validated structured output, usage, latency, and provider metadata. The first analyzer brings its first adapter; the team adds a second provider before claiming interchangeable-provider support. We propose OpenAI as that first adapter, behind the provider-independent contract. No benchmark in the planning record favors it over Anthropic, so the choice stays open for the user.
+Analyzers request capabilities, not vendors (D31). A `ModelRouter` maps a capability such as `VISION` or `STRUCTURED_OUTPUT` to a `ModelProvider` under model policy. The first analyzer brings the first provider; the team adds a second provider before claiming interchangeable-provider support. We propose OpenAI as that first adapter. No benchmark in the planning record favors it over Anthropic, so the choice stays open for the user.
 
 ```mermaid
 flowchart LR
@@ -320,26 +362,176 @@ flowchart LR
     Eval --> Decision[Maintainer promotion decision]
 ```
 
-Provider fallback preserves the requested capabilities and privacy constraints. Engineers record fallback use and validate outputs again. A failed call does not authorize an unlimited cascade of paid attempts. Shadow outputs remain outside published claims, ranking, and notifications until a maintainer promotes a version.
+Evaluation and shadow experimentation ship in V1 (D45). The same harness compares analyzers, resolvers, comp selectors, valuation models, deep-research triggers and scoring strategies on quality, cost and latency (D56). Shadow outputs stay outside published claims, evaluations and notifications until a maintainer promotes a version. Provider fallback preserves requested capabilities and privacy constraints, and a failed call does not authorize an unlimited cascade of paid attempts.
 
-The evaluation set covers duplicate identities, noisy listings, source conflicts, hard-filter unknowns, quiet-street uncertainty, and valuation holdouts. Engineers separate training examples from held-out evaluation and report results by source and field. A scalar confidence from a language model requires calibration before the product treats it as a probability.
+Each computation has an identity: the hash of its input evidence plus analyzer, prompt, model and ontology versions (D54). Repeating identical inputs reuses the stored run; changing any version produces a new run, and no run is ever overwritten (D8).
 
-#### Deployment, authentication, and operations
+#### Reusable intelligence and tenant privacy
 
-Dogfood runs on DigitalOcean with containerized Python services, Postgres, object storage, and MiniStack for the AWS APIs it proves compatible. Engineers pin the MiniStack image digest and test the specific services used; the upstream service list is a capability claim, not evidence of deployment parity [R7]. A restart-safe polling worker may substitute for an unsupported local scheduling or workflow feature behind the same task contracts.
+Engineers separate property facts, location context, and market context from each tenant's preferences. Property facts are global; tenant interpretation is private.
 
 ```mermaid
 flowchart LR
-    Dev[Local Compose] --> CI[GitHub Actions checks]
+    Property[Property intelligence] --> Eval[Tenant evaluation]
+    Location[Location intelligence] --> Eval
+    Travel[Tenant travel times] --> Eval
+    Market[Market intelligence] --> Valuation[Valuation distribution]
+    Property --> Valuation
+    Valuation --> Eval
+    Profile[PreferenceProfile and subscription] --> Eval
+    Eval --> Strategy[Tenant offer strategy]
+    Valuation --> Strategy
+```
+
+Reuse depends on source rights. Engineers may share a canonical property identifier across tenants, but they must scope evidence and claims to the tenants or entitlement groups allowed to use them. A household's offer ceiling, private notes, source credentials, destinations and feedback remain tenant-private. A cached result must include its entitlement scope in the cache key.
+
+Location intelligence is its own reusable subsystem (D42). It covers walkability, parks, schools, retail, freeway and airport proximity, hazards, lot position, commercial proximity and streetscape. Busy versus quiet street is a first-class attribute built from traffic level, functional class, estimated daily traffic, lane count, speed limit, signal proximity, truck traffic, cut-through risk and cul-de-sac status. The product distinguishes measured traffic from an inference. Protected demographic characteristics and proxies for steering do not enter suitability scores.
+
+Tenants define their important destinations, such as work, school, family or the airport, with times of day (D43). The system computes time-of-day travel times per property and destination. Destinations and their travel times stay tenant-private.
+
+#### Preferences and the adaptive interview
+
+Preferences live in two layers (D34). Global **preference definitions** describe how people may care about ontology attributes, for example "quiet street" satisfied by low traffic level and cul-de-sac status. The tenant's PreferenceProfile assigns importance, acceptable alternatives, goals, tradeoffs and learned evidence.
+
+```mermaid
+flowchart LR
+    Goal[Lifestyle goal] --> Pref[Preference or requirement]
+    Pref --> Attrs[Satisfying ontology attributes]
+    Attrs --> Weight[Importance and tradeoffs]
+    Weight --> Ex[Example properties]
+```
+
+An adaptive interview builds the profile from structured questions, conversation, example homes and property feedback (D15). The underlying goal often matters more than the literal feature: "a yard" may mean "somewhere the dog can run." The interview keeps explicit state, such as captured goals and open slots, and sends the model that state plus a few recent turns rather than the whole transcript. Voice may arrive later as another interaction adapter.
+
+The profile evolves with feedback, under versioning and approval rules (D16). Low-impact changes apply automatically. Material changes wait for explicit approval: hard requirements, budget, geography, a weight shift beyond a set threshold, or a major tradeoff, meaning one that involves a hard or critical preference. Every change creates a new version with evidence, and any version can be restored.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PROPOSED: Feedback suggests a change
+    PROPOSED --> AUTO_APPLIED: Classified low-impact
+    PROPOSED --> AWAITING_APPROVAL: Classified material
+    AWAITING_APPROVAL --> APPLIED: Member approves
+    AWAITING_APPROVAL --> REJECTED: Member rejects
+    AUTO_APPLIED --> REVERTED: Member restores prior version
+    APPLIED --> REVERTED: Member restores prior version
+```
+
+#### Multidimensional evaluation
+
+A **PropertyEvaluation** reports fit in several dimensions instead of one opaque score (D9). A home can suit daily life and still be overpriced.
+
+| Dimension | Computed from |
+|---|---|
+| Requirements | Hard requirements: pass, unknown or fail |
+| Lifestyle fit | Weighted household preferences and travel times |
+| Property quality | Condition, kitchen, layout and similar attributes |
+| Value | The valuation distribution against list price (D38) |
+| Critical mismatches | Critical-importance preferences the home clearly misses |
+| Overall | Deterministic combination of the above |
+
+```mermaid
+flowchart LR
+    Facts[Resolved values with status] --> Req[Requirements check]
+    Inputs[Profile and subscription versions] --> Req
+    Req -->|Pass or unknown| Dims[Lifestyle, quality and value scores]
+    Req -->|Fail| Excluded[Excluded with reasons]
+    Dims --> Pen[Critical mismatch penalties]
+    Pen --> Overall[Overall fit and coverage]
+    Overall --> Explain[LLM explanation of computed numbers]
+```
+
+Deterministic code computes every score, penalty and unknown treatment; an LLM may explain the result but never invents a number (D9). Requirements use three-valued logic: an unknown fact cannot satisfy a hard requirement, and the feed keeps unknown homes in a separate group from confirmed passes. Within each dimension, unknown values contribute zero against a fixed denominator and a separate coverage figure shows how much evidence exists. This avoids inflating a home's rank because it has less evidence.
+
+The feed orders homes by requirements group (pass, then unknown, then fail) and then by overall fit.
+
+#### Buyer strategy
+
+Choose among owner occupancy, living in one unit and renting the others, and holding the property for rental income. For a live-in duplex search, the buyer can require a unit available at closing. A lease on the other unit supports a rent claim for that unit. If the closing-date availability is unknown, show the home in the verification feed.
+
+#### Valuation and offer strategy
+
+Valuation is a separate reusable subsystem, not part of lifestyle analysis (D38). It starts with deterministic, explainable comparable selection that weighs micro-location, sale recency, size, lot, bed and bath configuration, architecture, condition, views, pool, garage and layout quality (D39). The product always shows which comps it selected and why.
+
+```mermaid
+flowchart LR
+    Comps[Eligible comparable sales] --> Select[Weighted comp selection with reasons]
+    Facts[Property facts] --> Select
+    Select --> Range[Price distribution and confidence]
+    Range --> Value[Value dimension]
+    Range --> Scenarios[Offer scenario calculator]
+    Buyer[Tenant budget, financing and risk tolerance] --> Scenarios
+    Scenarios --> Bids[Value, competitive and win-focused bids plus walk-away]
+```
+
+The canonical valuation is a distribution, not a point (D40): a central estimate, a likely range, a confidence and a comparison to list price. Two equal midpoints with different uncertainty receive different value treatment. Sparse or stale comps produce an abstention or a wide interval with a low-confidence label.
+
+Underwriting answers a different question: how much cash remains for this buyer after operating expenses, reserves and debt payments? Record the period and source for each input. Rent due under a lease, cash collected and an agent's projected rent can differ. Label each basis and show missing inputs before presenting a total.
+
+Offer strategy is tenant-specific and sits above valuation (D41). It combines the distribution with the buyer's budget, financing, competition, risk tolerance and regret tolerance to produce a value bid, a competitive bid, a win-focused bid and a walk-away threshold. When the buyer records what happened to an offer, the system keeps the outcome for future learning. It does not assert a seller's acceptance probability without a calibrated model, and it never submits offers or negotiates.
+
+#### Orchestration and partial results
+
+AWS uses Step Functions Standard for multi-step analysis, SQS for buffering, and EventBridge for schedules and domain-event routing (D21). State machines stay small, about 5 to 15 meaningful states, with business logic in Python; V1 uses no Temporal. Payloads pass IDs and evidence references. Each task commits its result and outbox event in one database transaction.
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> RUNNING
+    RUNNING --> COMPLETE: Required components succeed
+    RUNNING --> PARTIAL: Usable output with missing components
+    RUNNING --> WAITING_FOR_USER: Source login or verification needed
+    RUNNING --> FAILED: No usable output or terminal defect
+    WAITING_FOR_USER --> QUEUED: Authorized resume
+    PARTIAL --> QUEUED: Targeted retry
+    FAILED --> QUEUED: Operator retry after correction
+    QUEUED --> CANCELLED: User cancellation
+    RUNNING --> CANCELLED: Cooperative cancellation
+```
+
+Partial results are first-class (D53). Missing data resolves to `UNKNOWN`, each capability retries independently, and new data recomputes only dependent analysis. A profile reports its completeness.
+
+```mermaid
+sequenceDiagram
+    participant Flow as Analysis workflow
+    participant Property as Property analyzers
+    participant Location as Location enrichment
+    participant Result as Result assembler
+    Flow->>Property: Analyze evidence
+    Flow->>Location: Enrich location
+    Property-->>Result: Usable property claims
+    Location-->>Result: Retry budget exhausted
+    Result-->>Flow: PARTIAL profile with missing-location reason
+```
+
+Invalidation is separate from recomputation (D13). When an input changes, the system marks dependent capabilities stale under one of four modes: `EVENT` recomputes now, `LAZY` recomputes on next read, `BATCH` waits for a scheduled sweep, and `MANUAL` waits for an operator. A new ontology version marks results eligible for recomputation without forcing a backfill.
+
+Failures fall into six classes with fixed handling (D55). Failed work persists in Postgres and appears in the operations screen, not only in logs or dead-letter queues.
+
+| Class | Handling |
+|---|---|
+| `TRANSIENT` | Bounded exponential retry with backoff |
+| `AUTH_REQUIRED` | Pause dependent work; notify operator once |
+| `DATA_UNAVAILABLE` | Record `UNKNOWN`; retry on the invalidation schedule |
+| `INVALID_INPUT` | No retry; ask for correction |
+| `PERMANENT` | No retry; record and surface |
+| `BUG_UNKNOWN` | No automatic retry; dead-letter for an engineer and audited replay |
+
+#### Deployment, authentication, and operations
+
+Dogfood runs on DigitalOcean with Docker Compose, standalone Postgres, object storage, and MiniStack for the AWS APIs it proves compatible (D19). Engineers pin the MiniStack image digest and test the specific services used; the upstream service list is a capability claim, not evidence of deployment parity [R7]. Where MiniStack lacks a workflow feature, a local runner executes the same task handlers in one on-demand process behind the same task contracts.
+
+```mermaid
+flowchart LR
+    Dev[Local Compose] --> CI[GitHub Actions path-aware checks]
     CI --> Dogfood[DigitalOcean dogfood]
     Dogfood --> Gate[AWS compatibility gate]
     Gate --> Staging[AWS staging]
     Staging --> Release[Approved AWS release]
 ```
 
-AWS starts with API Gateway and Lambda for FastAPI, Cognito for identity, S3 for evidence, and RDS Postgres with bounded connection pools. The MCP adapter runs as its own Lambda behind the same API Gateway at `/mcp`; dogfood runs it as a separate container behind the same TLS proxy. Fargate handles browser sessions and tasks whose measured runtime or memory exceeds the Lambda budget. CDK in TypeScript defines AWS infrastructure; DigitalOcean uses a documented container deployment manifest rather than an invented claim that AWS CDK deploys it.
+AWS starts with API Gateway and Lambda for FastAPI (D27), Cognito for identity (D28), S3 for evidence, and RDS Postgres with bounded connection pools. The MCP adapter runs as its own Lambda behind the same API Gateway at `/mcp`; dogfood runs it as a separate container behind the same TLS proxy. Fargate handles browser sessions and tasks whose measured runtime or memory exceeds the Lambda budget. CDK in TypeScript defines AWS infrastructure (D20); DigitalOcean uses a documented container deployment manifest rather than an invented claim that AWS CDK deploys it.
 
-Users authenticate with Cognito authorization code flow and PKCE in dogfood and AWS. Local development can use a signed fixture issuer behind an explicit development flag. Engineers validate issuer, audience, token use, expiry, and tenant membership in both adapters. Service workers use scoped workload credentials rather than a user's browser token.
+Users authenticate with Cognito authorization code flow and PKCE in dogfood and AWS. Local development can use a signed fixture issuer behind an explicit development flag. Engineers validate issuer, audience, token use, expiry, and tenant membership in both adapters. Service tasks use scoped workload credentials rather than a user's browser token.
 
 ```mermaid
 sequenceDiagram
@@ -360,36 +552,40 @@ sequenceDiagram
 
 Engineers use database row-level security as defense in depth, alongside application authorization. Runtime roles neither own tables nor bypass row security. Pool users set tenant context per transaction and clear it at transaction end. Shared, rights-cleared intelligence uses explicit authorization paths rather than a null-tenant shortcut [R5].
 
-Operators use an operations screen to inspect queue age, failures, credential status, cost, and replay history. OpenTelemetry correlates requests, jobs, source calls, and model calls; AWS exports telemetry to CloudWatch. Engineers redact email bodies, cookies, tokens, and financial details from logs.
+Application code asks for logical secrets and configuration by name (D49). AWS resolves them from Secrets Manager and Parameter Store, with GitHub OIDC for deployments; dogfood injects them at deployment. Browser session state counts as a credential. Secrets never enter prompts, logs, fixtures, evidence or analysis records.
+
+OpenTelemetry and structured JSON logs instrument every stage (D50). One trace links an MLS email through ingestion, property, workflow, analysis run, model call, claim and notification. AWS exports to CloudWatch; dogfood exports to a lightweight self-hosted stack. Operators use an operations screen for queue age, failed work, credential status, cost and replay history.
 
 ```mermaid
 flowchart LR
     Commit[Committed result and outbox event] --> Notify[Notification dispatcher]
-    Notify --> Inbox[In-app notification]
-    Notify --> Mail[Email delivery]
+    Notify --> Inbox[In-app strategy]
+    Notify --> Mail[Email strategy]
     Mail --> Status[Delivery status and dedupe ledger]
     Inbox --> Status
     Status --> Ops[Operations screen]
 ```
 
-Notifications cover new qualified matches, material changes, and user action requests. Users choose email and in-app preferences; digests and cooldowns prevent repeated alerts for the same result version. External mail delivery can remain ambiguous after a timeout, so the dispatcher uses provider idempotency where available and records uncertain sends for reconciliation.
+Notifications use a pluggable `NotificationStrategy`; V1 ships email and in-app strategies, and SMS, Slack, push or webhooks can follow (D51). Every notification deep-links to the property page, which holds the full record (D10). Users choose channels; each subscription's notification policy sets thresholds, digests and cooldowns that prevent repeated alerts for the same result version. External mail delivery can remain ambiguous after a timeout, so the dispatcher uses provider idempotency where available and records uncertain sends for reconciliation.
 
-Engineers attribute paid work to tenant, property, job, analyzer, model, provider, and shared-intelligence scope from the first paid call (D56). Before a provider call, workers reserve estimated spend in a transactional budget ledger; completion reconciles actual usage. Budgets are configured per analysis tier, such as baseline versus deep analysis (D1), not inside individual analyzers (D56). Budget exhaustion defers optional enrichment while preserving intake and access to existing results. The ledger and reservations arrive with the first paid analyzer in phase 3; phase 5 adds cost views and operator budget controls.
+The property page holds seven sections: Summary, Photos, Personal Fit, Property Intelligence, Deep Research, Timeline and Feedback (D10). The Investor page adds income and scenarios.
+
+Engineers attribute paid work to tenant, property, workflow, analyzer, model, provider, and shared-intelligence scope from the first paid call (D56). Cost categories cover browser compute, vision and text analysis, maps and location APIs, property-data APIs, deep research and tenant evaluation. Before a provider call, tasks reserve estimated spend in a transactional budget ledger; completion reconciles actual usage. Budgets are configured per analysis tier, baseline versus deep, not inside individual analyzers. Budget exhaustion defers optional enrichment while preserving intake and access to existing results. The ledger and reservations arrive with the first paid analyzer in phase 3; phase 5 adds cost views and operator budget controls.
 
 ```mermaid
 flowchart LR
-    Task[Paid task] --> Reserve{Reserve budget}
+    Task[Paid task] --> Reserve{Reserve tier budget}
     Reserve -->|Allowed| Call[Provider call]
     Reserve -->|Denied| Defer[Deferred component]
     Call --> Reconcile[Reconcile actual cost]
     Reconcile --> Ledger[Usage ledger]
 ```
 
-Operators back up Postgres and evidence outside the dogfood host. The initial recovery objectives are a 24-hour recovery point and an 8-hour recovery time, pending a measured restore drill. Before AWS production, the team must demonstrate point-in-time database recovery and restoration of evidence references, encryption access, and application configuration.
+Operators back up Postgres and evidence storage independently and off the dogfood host (D52). Backups run daily, keep 30 daily copies and longer-lived monthly snapshots, and face periodic restore drills. The initial recovery objectives are a 24-hour recovery point and an 8-hour recovery time, pending a measured drill. Infrastructure and configuration stay reproducible from Git. Before AWS production, the team must demonstrate point-in-time database recovery and restoration of evidence references, encryption access, and application configuration.
 
 ```mermaid
 flowchart LR
-    Live[Database and evidence] --> Backup[Encrypted independent backups]
+    Live[Database and evidence] --> Backup[Encrypted independent daily backups]
     Backup --> Isolated[Isolated restore environment]
     Isolated --> Verify[Reference and digest checks]
     Verify --> Drill[Operator recovery report]
@@ -398,11 +594,12 @@ flowchart LR
 ### Non-goals
 
 - Commercial acquisitions and lease searches. Residential lease documents remain relevant evidence for a purchase.
-
 - Automated offer submission, brokerage transaction management, and autonomous negotiation.
 - Nationwide source coverage or a general web crawler in the MVP.
 - A lender appraisal, guaranteed sale price, or calibrated seller acceptance prediction before supporting evaluation.
-- A custom workflow engine, ontology editor, feature store, or vector database before a demonstrated use case.
+- Per-member preference profiles inside one tenant. V1 keeps one shared active household profile (D5).
+- An always-on worker fleet, a custom workflow engine, Temporal, a graphical ontology editor, a feature store, or a vector database before a demonstrated use case.
+- Billing, organizations and fine-grained RBAC beyond the `member`, `reviewer` and `operator` roles (D5).
 - A public multi-tenant SaaS launch during household dogfood. Engineers still enforce tenant isolation from the first migration.
 - Replacing source licensing agreements with a technical caching policy.
 
@@ -411,19 +608,25 @@ flowchart LR
 | Decision | Attractive alternative | Reason for rejection or deferral | Accepted cost |
 |---|---|---|---|
 | Two product sections on one website | Separate websites at launch | Both audiences need the same sign-in, listing evidence and calculations. Separate route groups let each audience start with its own questions. | Maintain two sets of navigation and page layouts. A later domain split can reuse the same API. |
+| One household profile plus strategy-specific subscriptions | One preference profile per search | The register fixes one shared active profile per tenant (D5); duplicating household needs per search would let them drift apart | A rental search must declare which household dimensions it ignores |
 | Python modular monolith | Independent microservices | Early boundaries will change; network contracts add deployment and debugging work | Shared release cadence; enforce modules through import rules |
 | Postgres plus JSONB | Document-only store | Identity, access scope, provenance, and idempotency need transactions and constraints | Schema migrations plus JSON schema evolution |
+| Relational state plus outbox | Pure event sourcing | Every read would rebuild state from a log; auditability needs only immutable history and domain events (D25) | Four writes per state change |
 | Claims plus evidence | One mutable AI summary | Reviewers cannot reconstruct conflicting observations or reproduce scoring | More records and explicit resolution policy |
-| Deterministic matching | LLM ranks homes from prompts | Prompt/model changes would change hard eligibility without a stable explanation | Engineers maintain utility functions and ontology mappings |
-| Step Functions Standard | Temporal | Durable workflows fit both, but AWS-native orchestration matches the selected hosting path and reduces dogfood infrastructure | Local parity needs tests; workflow definitions use AWS semantics |
+| Ontology in Postgres | Ontology as code files only | A file-only ontology needs a deployment for every attribute change (D33) | Seed files and database copy must stay in sync through a load command |
+| Specialized analyzers | One multimodal property prompt | One prompt cannot be tested, versioned or replaced piecemeal (D14) | More analyzer definitions and a router |
+| Conditional deep research | Deep research on every property | Cost and latency grow with inbox volume while most homes fail fit (D1, D6) | Some useful findings arrive only after a trigger fires |
+| Multidimensional deterministic evaluation | LLM ranks homes from prompts, or one blended score | Prompt changes would change eligibility without a stable explanation; one score hides an overpriced fit (D9) | Engineers maintain utility functions, dimension weights and ontology mappings |
+| Step Functions Standard | Temporal | Durable workflows fit both, but AWS-native orchestration matches the selected hosting path and reduces dogfood infrastructure (D21) | Local parity needs tests; workflow definitions use AWS semantics |
+| On-demand task invocations | Always-on worker fleet | Idle workers cost money in a mostly idle system (D26) | IMAP needs a once-a-minute multi-poll invocation; dogfood needs a launcher |
 | Lambda-first | Fargate for all compute | Idle containers add operating cost for intermittent short jobs | Cold starts, connection constraints, task-size discipline |
-| Fargate browser worker | Browser in all Lambdas | Session management and variable page runtimes complicate a short-lived runtime | A container worker and credential lease need operations |
+| Fargate browser task | Browser in all Lambdas | Session management and variable page runtimes complicate a short-lived runtime | A container task and credential lease need operations |
 | OpenAPI codegen | Hand-maintained frontend client | Two endpoint/type definitions drift | Generated output and deterministic regeneration become CI inputs |
 | Parallel MCP adapter | MCP wrapper around REST | Shared use cases avoid transport coupling and retain one authorization implementation | Two adapter contract suites |
 | MiniStack dogfood | AWS-only development | Local/dogfood feedback benefits from the selected emulator path | Engineers prove service compatibility in real AWS before release |
 | Content-addressed evidence | Mutable source URL references | Source pages change or expire | Storage, retention, access entitlement, and deletion obligations |
-| Selective verification | Human review of all claims | Review volume could block the feed | Low-impact inferred fields retain uncertainty labels |
-| Comparable-sales baseline | Opaque valuation model first | No supplied training corpus or backtest supports a more complex initial model | Sparse markets may require abstention |
+| Selective verification | Human review of all claims | Review volume could block the feed (D37) | Low-impact inferred fields retain uncertainty labels |
+| Comparable-sales baseline | Opaque valuation model first | No supplied training corpus or backtest supports a more complex initial model (D39) | Sparse markets may require abstention |
 
 ### Phased rollout
 
@@ -431,15 +634,15 @@ Milestones describe release scope. Engineers generate task-level work from the B
 
 | Phase | Outcome and scope boundary | Exit evidence |
 |---|---|---|
-| 0. Foundation | Monorepo, configuration, auth, tenancy, migrations, CI, Compose, MiniStack compatibility inventory | Two-tenant isolation checks and repeatable clean bootstrap |
-| 1. MLS ingestion | Dedicated mailbox, raw retention, TheMLS email parser, identity and listing snapshots | Replayed email corpus creates no duplicate listing episode or snapshot |
-| 2. TheMLS enrichment | Browser credential lifecycle, media capture, evidence manifests, failure classification | Captured listing with expired-session recovery and immutable evidence |
-| 3. Property intelligence | Ontology v1, claims, resolution, first multimodal analyzer, minimal budget ledger and reservations for paid calls, targeted verification | Golden-property evaluation and evidence-linked profile |
-| 4. Preferences and matching | Preference revisions, hard filters, score, explanations | Deterministic golden ranking and unknown handling |
-| 5. Homebuyer dogfood | Single-family home search, Homebuyer feed/detail UI, shortlist and visit questions, evidence, corrections, email and in-app notifications, basic ops, cost views and operator budget controls | One household completes the intake-to-review loop on DigitalOcean; restore drill passes |
-| 6. Location intelligence | Street quality, first permitted external location source, stale-data rules | Field-level evaluation with measured versus inferred labels |
-| 7. Market intelligence | Comps, price distributions, freshness, holdout evaluation | Backtest report and calibrated interval checks or explicit abstention |
-| 8. Investor experience and offer strategy | Investor onboarding and feed, rent-roll intake, unit-level occupancy, operating expenses, financing, cash flow and walk-away ceiling. Expose the live-in scenario in Homebuyer too. | One duplex evaluated under both strategies, plus reproducible scenarios and isolation tests |
+| 0. Foundation | Monorepo layout (D47), configuration and secrets port, auth, tenancy, migrations, path-aware CI, Compose, on-demand task launcher and scheduler, failure taxonomy, telemetry baseline, MiniStack compatibility inventory | Two-tenant isolation checks, repeatable clean bootstrap, path-aware CI run |
+| 1. MLS ingestion | Scheduled IMAP intake, raw `.eml` retention, TheMLS email parser, source observations, identity, listing history with outbox, manual add by URL or address (API) | Replayed email corpus creates no duplicate listing episode or observation |
+| 2. TheMLS enrichment | Browser profile lifecycle, capability-based enrichment, content-addressed media, failure classification | Captured listing with expired-session recovery and immutable evidence |
+| 3. Property intelligence | Ontology v1 in Postgres (75+ attributes), claims with D7 statuses and resolution, model router, first analyzer set, baseline and deep tiers with manual trigger, budget ledger and tier reservations, invalidation, human correction claims, value-of-information queue | Golden-property evaluation and evidence-linked profile |
+| 4. Preferences and evaluation | PreferenceProfile versions, preference definitions, adaptive interview, preference evolution, search subscriptions, hard pre-filter, multidimensional evaluation, automatic deep-research triggers | Deterministic golden evaluations, unknown handling and trigger-rate report |
+| 5. Homebuyer dogfood | Homebuyer onboarding, feed and seven-section property page, manual add UI, shortlist, visit questions, tours with post-tour questions, corrections, email and in-app notifications, operations UI, cost views and operator budget controls, backups | One household completes the intake-to-review loop on DigitalOcean; restore drill passes |
+| 6. Location intelligence | Location subsystem with busy/quiet street attributes, first permitted location source, tenant destinations and time-of-day travel times | Field-level evaluation with measured versus inferred labels |
+| 7. Market intelligence | Explainable comp selection, price distributions, Value dimension, holdout evaluation | Backtest report and calibrated interval checks or explicit abstention |
+| 8. Investor experience and offer strategy | Investor onboarding and feed, rent-roll intake, unit-level occupancy, operating expenses, financing, cash flow, offer bids and walk-away threshold, offer outcomes. Expose the live-in scenario in Homebuyer too. | One duplex evaluated under both strategies, plus reproducible scenarios and isolation tests |
 | 9. AWS release hardening | CDK deployment, Step Functions/Fargate compatibility, shadow promotion, operational drills | AWS staging smoke, fault injection, budget alarms, restore and rollback reports |
 
 The team implements baseline evaluation, security, telemetry, idempotency, and backups in the phases that first need them. Phase 9 expands those controls; it does not postpone them until after dogfood.
@@ -451,15 +654,19 @@ The team implements baseline evaluation, security, telemetry, idempotency, and b
 | TheMLS automation, media storage, and reuse rights | Do not assume access rights; scope source connector and cached results to authorized use | User/source account owner before live source capture |
 | Real email and page formats absent | Use synthetic fixtures, then capture redacted authorized examples | User and connector engineer before parser acceptance |
 | Mail host and authentication method unknown | IMAP port with provider configuration; prefer OAuth where supported | User before live mailbox setup |
-| TheMLS MFA, session lifetime, and source-ID reuse unknown | Credential leases, `auth_required`, fixture research, explicit episode policy | Connector engineer in phase 2 |
+| TheMLS MFA, session lifetime, and source-ID reuse unknown | Credential leases, `AUTH_REQUIRED`, fixture research, explicit episode policy | Connector engineer in phase 2 |
 | MiniStack service fidelity and CDK bootstrap compatibility | Pin digest; record actual API tests and unsupported operations | Infrastructure engineer in phase 0 and AWS gate |
-| Initial ontology and preference weights unconfirmed | Seed proposed fields; require household review of preference revision | User in phase 4 |
+| Initial ontology attributes and preference weights unconfirmed | Seed the proposed 75+ attributes; require household review of the first preference version | User in phase 4 |
 | Licensed evidence may prohibit cross-tenant reuse or long retention | Entitlement-aware storage and retention classes | Source owner before sharing or locking evidence |
 | No valuation corpus or calibration target supplied | Baseline and holdout design; abstain until release gate passes | Model owner in phase 7 |
-| AI budget and useful latency target unconfirmed | Configurable conservative limits; measure pilot distribution | User and operator before the first paid analyzer run in phase 3 |
+| No public-record provider chosen for `ASSESSOR`, `PERMITS`, `ZONING`, `TAX_HISTORY` | Deep tier runs without those capabilities and marks them `UNKNOWN` until a permitted provider exists | User before the provider enters a phase |
+| AI budget per tier and useful latency target unconfirmed | Configurable conservative limits; measure pilot distribution | User and operator before the first paid analyzer run in phase 3 |
 | Recovery targets may exceed single-host dogfood capability | Independent backups and timed restore drill | Operator before phase 5 release |
 | OpenAI as default first AI provider: D31 requires a multi-provider abstraction with one or two initial implementations but names no vendor, and no benchmark favors one | Recommend OpenAI behind the provider-independent contract; Anthropic is the alternative first adapter | User, before confirmation |
 | Which MCP clients must connect, and whether they support remote streamable HTTP with OAuth | Recommend streamable HTTP at `/mcp` with Cognito authorization code and PKCE and a pre-registered client ID; a local stdio server is the alternative | User, before confirmation |
+| D5 fixes one household profile per tenant; the later Homebuyer/Investor split needs strategy-specific criteria | Recommend one active PreferenceProfile plus per-subscription strategy criteria; `rental_hold` subscriptions skip the Lifestyle fit dimension and household lifestyle requirements | User, before confirmation |
+| D16 names material change types but no thresholds | Recommend: a single learned weight change above 0.05 normalized share, or cumulative learned drift above 0.10 since the last explicit approval, counts as material (BTL Preferences requirement) | User, before confirmation |
+| D22 asks for 15–30 s polling; schedulers fire at most once a minute, and EventBridge Scheduler only promises 60-second precision [R9], so an occasional gap between polls can exceed 30 s | Recommend one invocation per minute that polls every 20 s for 45 s, instead of an always-on poller (D26); dogfood reports the measured poll-gap distribution. If a strict 30 s ceiling matters, the alternatives are overlapping invocations or a push ingress (IMAP IDLE or webhook) behind `EmailIngress` | User, before confirmation |
 
 - [ ] Confirm the Investor launch size range before sourcing evaluation data. One to four units is the proposed starting boundary. Five-plus-unit support remains undecided.
 - [ ] Confirm the first mailbox provider and authorized TheMLS workflow.
@@ -476,363 +683,524 @@ The team implements baseline evaluation, security, telemetry, idempotency, and b
 
 ### Scope and repository map
 
-All paths below are repository-relative and designate files to create. There are no existing product files to modify. Generate lockfiles during bootstrap and commit them. Create modules when their phase begins; do not create empty framework layers merely to populate this map.
+All paths below are repository-relative and designate files to create. There are no existing product files to modify. The top-level layout follows D47: `/backend`, `/frontend`, `/infrastructure`, `/ontology`, `/fixtures`, `/specs`, `/docs`, plus root tooling files and `/.github`. Evaluation datasets live under `/fixtures`; the evaluation harness configuration and reports live under `/backend/evals`. Generate lockfiles during bootstrap and commit them. Create modules when their phase begins; do not create empty framework layers merely to populate this map.
 
 ```text
 /specs/property-focus/master-plan.md                 This document
 /specs/property-focus/architecture-decisions.md       Canonical user decision register (D1–D56)
 /specs/property-focus/source-rights.md                Rights, retention and entitlement decisions
-/specs/property-focus/compatibility.md                MiniStack versus AWS operation matrix
 /specs/property-focus/evaluation-policy.md            Dataset splits, metrics, release thresholds
-/specs/property-focus/operations.md                   Runbooks, recovery, incident and replay procedures
+/docs/compatibility.md                              MiniStack versus AWS operation matrix
+/docs/operations.md                                 Runbooks, recovery, incident, replay and restore-drill procedures
 /README.md                                          Bootstrap and commands
 /AGENTS.md                                          Boundaries, verification and generated-file rules
 /.gitignore                                         Secrets, sessions, local evidence and caches
 /.env.example                                       Placeholder configuration; no credentials
-/pyproject.toml                                     uv workspace, Python dependencies and tooling
+/pyproject.toml                                     uv workspace root (member: backend) and shared tooling
 /uv.lock                                            Locked Python dependency graph
 /package.json                                       pnpm workspace and root commands
-/pnpm-workspace.yaml                                Web, API client and CDK workspaces
+/pnpm-workspace.yaml                                Workspaces: frontend, infrastructure/cdk
 /pnpm-lock.yaml                                     Locked JavaScript dependency graph
 /tsconfig.base.json                                 Shared strict TypeScript settings
 /Makefile                                           Exact commands specified below
-/compose.yaml                                       Local Postgres, services, MiniStack and dev mail sink
-/docker/api.Dockerfile                              API and ordinary worker image build stages
-/docker/browser.Dockerfile                          Pinned Playwright and browser image
-/.github/workflows/ci.yml                            Checks and artifact build
+/compose.yaml                                       Local Postgres, API, MCP, scheduler, MiniStack, mail sink, OTel stack
+/.github/workflows/ci.yml                            Path-aware checks and artifact build (D48)
 /.github/workflows/deploy-dogfood.yml                Reviewed DigitalOcean deployment
 /.github/workflows/deploy-aws.yml                    OIDC, CDK diff, protected release
-/.github/workflows/evaluate.yml                      Manual/scheduled replay and shadow evaluation
+/.github/workflows/evaluate.yml                      Manual/scheduled replay, golden and shadow evaluation
+/.github/workflows/live-integration.yml              Opt-in/nightly live provider and infrastructure tests
 /.github/workflows/backup-restore-check.yml          Restore validation on isolated resources
-/apps/backend/pyproject.toml                        property_focus package and CLI entrypoint
-/apps/backend/alembic.ini                           Migration configuration
-/apps/backend/migrations/env.py                     Alembic metadata and settings
-/apps/backend/migrations/versions/0001_core.py      Tenants, identity, evidence, claims, jobs, budget ledger
-/apps/backend/migrations/versions/0002_matching.py  Preferences, evaluations, shortlist, feedback, notifications
-/apps/backend/migrations/versions/0003_finance.py    Market, valuation, offer scenario persistence
-/apps/backend/src/property_focus/__init__.py         Package marker
-/apps/backend/src/property_focus/config.py           Typed settings and environment validation
-/apps/backend/src/property_focus/cli.py             migrate/seed/replay/evaluate/restore-check commands
-/apps/backend/src/property_focus/domain/identity.py  Property and listing matching rules
-/apps/backend/src/property_focus/domain/claims.py    Claims, evidence, resolution and scope rules
-/apps/backend/src/property_focus/domain/ontology.py  Ontology validation and migration compatibility
-/apps/backend/src/property_focus/domain/preferences.py Preference revision and criterion contracts
-/apps/backend/src/property_focus/domain/matching.py  Three-valued filters and deterministic scores
-/apps/backend/src/property_focus/domain/valuation.py Comparable selection and price distribution
-/apps/backend/src/property_focus/domain/offers.py   Scenario and walk-away calculations
-/apps/backend/src/property_focus/domain/underwriting.py Unit income, cash flow and expense normalization
-/apps/backend/src/property_focus/domain/errors.py    Stable failure taxonomy
-/apps/backend/src/property_focus/application/ports.py Repository, storage, AI and source protocols
-/apps/backend/src/property_focus/application/context.py Authenticated principal, tenant and entitlement
-/apps/backend/src/property_focus/application/ingestion.py Intake, document upload and identity use cases
-/apps/backend/src/property_focus/application/intelligence.py Analysis, profile and verification use cases
-/apps/backend/src/property_focus/application/matching.py Match and preference use cases
-/apps/backend/src/property_focus/application/finance.py Valuation and offer use cases
-/apps/backend/src/property_focus/application/jobs.py  Leases, idempotency, outbox and state transitions
-/apps/backend/src/property_focus/application/notifications.py Notification selection and deduplication
-/apps/backend/src/property_focus/application/budgets.py Reservations and usage attribution
-/apps/backend/src/property_focus/adapters/rest/app.py FastAPI factory and middleware
-/apps/backend/src/property_focus/adapters/rest/schemas.py Pydantic API request/response schemas
-/apps/backend/src/property_focus/adapters/rest/routes.py API endpoint bindings
-/apps/backend/src/property_focus/adapters/mcp/server.py Streamable HTTP transport at /mcp and tool bindings
-/apps/backend/src/property_focus/adapters/auth/cognito.py Token and membership checks for REST and MCP; MCP protected-resource metadata
-/apps/backend/src/property_focus/adapters/db/models.py SQLAlchemy models and constraints
-/apps/backend/src/property_focus/adapters/db/repositories.py Scoped repositories and unit of work
-/apps/backend/src/property_focus/adapters/db/rls.sql   Row security definitions installed by migrations
-/apps/backend/src/property_focus/adapters/storage/objects.py S3-compatible evidence store
-/apps/backend/src/property_focus/adapters/sources/imap.py Mailbox polling and checkpoint handling
-/apps/backend/src/property_focus/adapters/sources/themls_email.py MIME and listing-link parser
-/apps/backend/src/property_focus/adapters/sources/themls_browser.py Playwright extraction and auth state
-/apps/backend/src/property_focus/adapters/sources/location.py First licensed location source
-/apps/backend/src/property_focus/adapters/sources/market.py First licensed comparable-sales source
-/apps/backend/src/property_focus/adapters/ai/base.py  Provider capability and response validation
-/apps/backend/src/property_focus/adapters/ai/openai.py First provider adapter; recommended default pending user confirmation (Risks)
-/apps/backend/src/property_focus/adapters/ai/anthropic.py Second adapter; passes the shared capability contract by the AWS ready gate (phase 9), earlier if needed
-/apps/backend/src/property_focus/adapters/notifications/email.py Email provider and delivery reconciliation
-/apps/backend/src/property_focus/adapters/telemetry.py OTel setup and redaction
-/apps/backend/src/property_focus/workers/handlers.py  Bounded task handlers for local and AWS invocations
-/apps/backend/src/property_focus/workers/poller.py    Restart-safe dogfood queue/schedule runner
-/apps/backend/src/property_focus/workers/browser.py   Browser container entrypoint
-/apps/backend/src/property_focus/workers/outbox.py    Outbox and notification dispatch loop
-/apps/backend/src/property_focus/analyzers/property.py Property analysis schema and prompt binding
-/apps/backend/src/property_focus/analyzers/location.py Street/location inference
-/apps/backend/src/property_focus/analyzers/market.py Market summary from deterministic metrics
-/apps/backend/src/property_focus/analyzers/documents.py Rent roll, lease and expense statement extraction (phase 8)
-/apps/backend/tests/unit/test_identity.py            Matching, merges, units and relistings
-/apps/backend/tests/unit/test_claims.py              Resolution, provenance and scope
-/apps/backend/tests/unit/test_matching.py            Eligibility, score, coverage and reproducibility
-/apps/backend/tests/unit/test_finance.py            Quantiles, leakage, scenario arithmetic
-/apps/backend/tests/unit/test_underwriting.py       Duplex, vacancy basis, missing values and debt service
-/apps/backend/tests/unit/test_ai.py                  Schema validation, fallback and accounting
-/apps/backend/tests/integration/test_ingestion.py   MIME, IMAP checkpoints and evidence writes
-/apps/backend/tests/integration/test_tenancy.py      RLS, signed evidence URLs and adapter parity
-/apps/backend/tests/integration/test_jobs.py         Retries, leases, outbox and budget races
-/apps/backend/tests/integration/test_browser.py      Recorded browser pages and auth expiry
-/apps/backend/tests/integration/test_recovery.py    Restore manifests and evidence integrity
-/apps/backend/tests/integration/test_evidence_immutability.py Write-once and restore checks against the real dogfood bucket
-/apps/backend/tests/contract/test_api.py             OpenAPI responses and error contracts
-/apps/backend/tests/contract/test_mcp.py             Tool schemas, authorization and result parity
-/apps/backend/tests/aws/test_pipeline.py             Real AWS deployed smoke and redelivery
-/apps/web/package.json                              React/Vite scripts and dependencies, including @axe-core/playwright
-/apps/web/index.html                                Vite entry document
-/apps/web/vite.config.ts                            Build and proxy settings
-/apps/web/tsconfig.json                             Strict web TypeScript settings
-/apps/web/src/main.tsx                              React root
-/apps/web/src/app/store.ts                          Redux store and RTK Query registration
-/apps/web/src/app/router.tsx                        Routes and sign-in boundary
-/apps/web/src/auth/session.ts                       PKCE session and token lifecycle
-/apps/web/src/products/homebuyer/Layout.tsx         Homebuyer navigation and route group
-/apps/web/src/products/homebuyer/Onboarding.tsx     Household requirements and search creation
-/apps/web/src/products/homebuyer/HomeFeed.tsx       Homebuyer feed under /homebuyer: fit, eligibility status and unknowns
-/apps/web/src/products/homebuyer/PropertyDetail.tsx Homebuyer detail: fit, evidence, unknowns, history, shortlist, visit questions
-/apps/web/src/products/investor/Layout.tsx          Investor navigation and route group (phase 8)
-/apps/web/src/products/investor/Onboarding.tsx      Strategy, budget and financing assumptions
-/apps/web/src/products/investor/AcquisitionFeed.tsx Investment criteria and incomplete estimates
-/apps/web/src/products/investor/PropertyDetail.tsx  Rent roll, expense evidence and scenario comparison
-/apps/web/e2e/products.spec.ts                      Same-account searches and duplex strategy switch
-/apps/web/e2e/accessibility.spec.ts                 axe scan and keyboard-only path for feed, dialogs and verification
-/apps/web/src/pages/Preferences.tsx                 Revision editor and comparison
-/apps/web/src/pages/Verification.tsx                Review queue and corrections
-/apps/web/src/pages/Notifications.tsx               In-app inbox and channel settings
-/apps/web/src/pages/Operations.tsx                  Role-gated failures, costs and retry controls
-/apps/web/src/pages/Valuation.tsx                   Distribution and comparable explanations
-/apps/web/src/pages/OfferScenarios.tsx              Tenant scenario inputs and output
-/apps/web/src/components/EvidenceViewer.tsx         Authorized image/document display
-/apps/web/src/components/ResultStatus.tsx           Partial, stale and unknown indicators
-/apps/web/src/styles.css                           Accessible layout and status styles
-/apps/web/tests/matching.test.tsx                   Fit and unknown presentation
-/apps/web/tests/operations.test.tsx                 Replay confirmation and role controls
-/apps/web/e2e/dogfood.spec.ts                       Sign-in, feed, evidence, preference and feedback loop
-/packages/api-client/package.json                  Client build and generation scripts
-/packages/api-client/openapi.json                   Committed exported schema
-/packages/api-client/codegen.ts                     RTK Query OpenAPI configuration
-/packages/api-client/src/baseApi.ts                 Auth headers, errors and cache tags
-/packages/api-client/src/generated.ts               Generated endpoints and types
-/packages/ontology/v1.json                          Proposed field types, units and enums
-/packages/ontology/CHANGELOG.md                     Version compatibility and field migrations
-/packages/prompts/property-v1.md                    Versioned extraction instructions
-/packages/prompts/location-v1.md                    Versioned location interpretation instructions
-/packages/prompts/documents-v1.md                   Versioned rent roll, lease and expense extraction instructions
-/infra/cdk/package.json                             CDK build, synth, test and deployment scripts
-/infra/cdk/cdk.json                                 CDK app configuration
-/infra/cdk/bin/property-focus.ts                      App and environment selection
-/infra/cdk/lib/data-stack.ts                        RDS, S3, KMS and backup configuration
-/infra/cdk/lib/identity-stack.ts                    Cognito, web application client and public MCP client (PKCE)
-/infra/cdk/lib/api-stack.ts                         API Gateway, REST and MCP (/mcp) Lambdas and permissions
-/infra/cdk/lib/workflow-stack.ts                    Step Functions, queues, events and browser task
-/infra/cdk/lib/observability-stack.ts               Dashboards, alarms and budget notifications
-/infra/cdk/workflows/analyze.asl.json                Standard workflow definition
-/infra/cdk/test/security.test.ts                    Public access, IAM and encryption assertions
-/infra/cdk/test/workflow.test.ts                    Retry, catch, timeout and reference-only payloads
-/infra/dogfood/compose.yaml                         DigitalOcean production override, including the mcp service
-/infra/dogfood/Caddyfile                            TLS termination and routes for web, /v1 API and /mcp
-/infra/dogfood/deploy.sh                            Pinned image deployment and health checks
-/infra/dogfood/backup.sh                            Database and object backup entrypoint
-/scripts/export_openapi.py                         Deterministic schema exporter without live services
-/scripts/check_boundaries.py                       Import rules for domain/application/adapters
-/scripts/check_fixture_secrets.py                  Fixture and credential leak checks
-/evals/datasets/golden-properties.jsonl             Redacted/synthetic labeled property cases
-/evals/datasets/valuation-holdout.jsonl              Time-split sales, added when licensed
-/evals/fixtures/mail/multipart.eml                  Synthetic multipart MLS email
-/evals/fixtures/mail/duplicate.eml                  Duplicate delivery fixture
-/evals/fixtures/themls/listing.html                 Synthetic recorded page
-/evals/fixtures/themls/login.html                   Session-expired page
-/evals/config/baseline.yaml                         Dataset hashes, metrics and thresholds
-/evals/reports/.gitkeep                             Report output directory marker
+/backend/pyproject.toml                             property-focus distribution, property_focus package, CLI entrypoint
+/backend/alembic.ini                                Migration configuration
+/backend/migrations/env.py                          Alembic metadata and settings
+/backend/migrations/versions/0001_core.py           Tenants, identity, observations, evidence, claims, ontology, analysis runs, workflow runs, outbox, budget ledger
+/backend/migrations/versions/0002_evaluation.py     Preferences, subscriptions, interview, evaluations, triggers, shortlist, feedback, tours, notifications
+/backend/migrations/versions/0003_location.py       Location profiles, travel-time results
+/backend/migrations/versions/0004_finance.py        Market, valuation, offer scenario and outcome persistence
+/backend/src/property_focus/__init__.py              Package marker
+/backend/src/property_focus/config.py                Typed settings, environment validation, tier budgets
+/backend/src/property_focus/cli.py                   migrate/seed/ontology/run-task/replay/evaluate/restore-check commands
+/backend/src/property_focus/domain/identity.py       Property and listing matching rules with confidence
+/backend/src/property_focus/domain/claims.py         Claims, value statuses, evidence locators and scope rules
+/backend/src/property_focus/domain/resolution_rules.py Code registry of named attribute resolution rules
+/backend/src/property_focus/domain/ontology.py       Ontology validation, lifecycle and version compatibility
+/backend/src/property_focus/domain/invalidation.py   Invalidation records and EVENT/LAZY/BATCH/MANUAL modes
+/backend/src/property_focus/domain/funnel.py         Versioned hard pre-filter stage
+/backend/src/property_focus/domain/triggers.py       Deep-research trigger strategy and anomaly rules
+/backend/src/property_focus/domain/verification.py   Value-of-information priority
+/backend/src/property_focus/domain/preferences.py    Profile versions, preference definitions, materiality classifier
+/backend/src/property_focus/domain/interview.py      Interview state machine and slot model
+/backend/src/property_focus/domain/evaluation.py     Requirements, dimension scores, penalties, overall fit
+/backend/src/property_focus/domain/valuation.py      Weighted comp selection and price distribution
+/backend/src/property_focus/domain/offers.py         Bid scenarios and walk-away calculations
+/backend/src/property_focus/domain/underwriting.py   Unit income, cash flow and expense normalization
+/backend/src/property_focus/domain/errors.py         Failure classes and stable codes
+/backend/src/property_focus/application/ports.py     Repository, storage, model, source, enricher, launcher, secret and notification protocols
+/backend/src/property_focus/application/context.py   Authenticated principal, tenant and entitlement
+/backend/src/property_focus/application/ingestion.py Intake, manual add, document upload and identity use cases
+/backend/src/property_focus/application/enrichment.py Capability registry and enricher selection (primary/secondary/shadow)
+/backend/src/property_focus/application/intelligence.py Analysis tiers, profiles, corrections and verification use cases
+/backend/src/property_focus/application/preferences.py Profile, subscription, interview and proposal use cases
+/backend/src/property_focus/application/evaluation.py Evaluation, feed and deep-trigger use cases
+/backend/src/property_focus/application/location.py  Location profiles and tenant travel times
+/backend/src/property_focus/application/finance.py   Valuation, offer and outcome use cases
+/backend/src/property_focus/application/workflows.py Workflow runs, leases, idempotency, outbox and state transitions
+/backend/src/property_focus/application/notifications.py Notification selection, strategies and deduplication
+/backend/src/property_focus/application/budgets.py   Tier reservations and usage attribution
+/backend/src/property_focus/adapters/rest/app.py     FastAPI factory and middleware
+/backend/src/property_focus/adapters/rest/schemas.py Pydantic API request/response schemas
+/backend/src/property_focus/adapters/rest/routes.py  API endpoint bindings
+/backend/src/property_focus/adapters/mcp/server.py   Streamable HTTP transport at /mcp and tool bindings
+/backend/src/property_focus/adapters/auth/cognito.py Token and membership checks for REST and MCP; MCP protected-resource metadata
+/backend/src/property_focus/adapters/db/models.py    SQLAlchemy models and constraints
+/backend/src/property_focus/adapters/db/repositories.py Scoped repositories and unit of work
+/backend/src/property_focus/adapters/db/rls.sql      Row security definitions installed by migrations
+/backend/src/property_focus/adapters/storage/objects.py S3-compatible content-addressed evidence store
+/backend/src/property_focus/adapters/secrets.py      Secrets Manager/Parameter Store and deployment-injected providers
+/backend/src/property_focus/adapters/sources/imap.py Mailbox polling and checkpoint handling (EmailIngress)
+/backend/src/property_focus/adapters/sources/themls_email.py MIME and listing-link parser (PropertySource)
+/backend/src/property_focus/adapters/sources/themls_browser.py Playwright extraction and profile state (LISTING, PHOTOS, REMARKS, LISTING_HISTORY)
+/backend/src/property_focus/adapters/sources/manual.py URL and address manual-add source
+/backend/src/property_focus/adapters/sources/location.py First permitted location source (phase 6)
+/backend/src/property_focus/adapters/sources/market.py First licensed comparable-sales source (phase 7)
+/backend/src/property_focus/adapters/ai/base.py      ModelProvider contract and response validation
+/backend/src/property_focus/adapters/ai/router.py    ModelRouter: capability and policy to provider/model
+/backend/src/property_focus/adapters/ai/openai.py    First provider adapter; recommended default pending user confirmation (Risks)
+/backend/src/property_focus/adapters/ai/anthropic.py Second adapter; passes the shared capability contract by the AWS ready gate (phase 9), earlier if needed
+/backend/src/property_focus/adapters/notifications/email.py EmailNotificationStrategy and delivery reconciliation
+/backend/src/property_focus/adapters/notifications/in_app.py InAppNotificationStrategy
+/backend/src/property_focus/adapters/telemetry.py    OTel setup, trace propagation and redaction
+/backend/src/property_focus/runtime/run_task.py      Single-task entrypoint shared by Lambda, Fargate and dogfood processes
+/backend/src/property_focus/runtime/lambda_handler.py AWS Lambda task adapter
+/backend/src/property_focus/runtime/launcher.py      TaskLauncher: Step Functions/Lambda/Fargate in AWS, on-demand process or container in dogfood
+/backend/src/property_focus/runtime/local_workflow.py Dogfood runner executing the analyze workflow's states in one on-demand process
+/backend/src/property_focus/runtime/scheduled.py     Short-lived scheduled tasks: imap-poll, outbox-sweep, repair, invalidation-batch
+/backend/src/property_focus/analyzers/base.py        Analyzer protocol, registry, tier and attribute declarations
+/backend/src/property_focus/analyzers/text.py        TextAnalyzer (baseline)
+/backend/src/property_focus/analyzers/photo.py       PhotoAnalyzer (baseline)
+/backend/src/property_focus/analyzers/condition.py   ConditionAnalyzer (baseline)
+/backend/src/property_focus/analyzers/kitchen.py     KitchenAnalyzer (baseline)
+/backend/src/property_focus/analyzers/floorplan.py   FloorplanAnalyzer (deep)
+/backend/src/property_focus/analyzers/layout.py      LayoutAnalyzer (deep)
+/backend/src/property_focus/analyzers/location.py    Street/traffic inference (phase 6)
+/backend/src/property_focus/analyzers/documents.py   Rent roll, lease and expense statement extraction (phase 8)
+/backend/src/property_focus/analyzers/explanation.py Evaluation explanation from computed numbers (no scoring)
+/backend/src/property_focus/analyzers/prompts/text-v1.md Versioned prompt
+/backend/src/property_focus/analyzers/prompts/photo-v1.md Versioned prompt
+/backend/src/property_focus/analyzers/prompts/condition-v1.md Versioned prompt
+/backend/src/property_focus/analyzers/prompts/kitchen-v1.md Versioned prompt
+/backend/src/property_focus/analyzers/prompts/floorplan-v1.md Versioned prompt
+/backend/src/property_focus/analyzers/prompts/layout-v1.md Versioned prompt
+/backend/src/property_focus/analyzers/prompts/interview-v1.md Versioned interview question/proposal prompt
+/backend/src/property_focus/analyzers/prompts/location-v1.md Versioned location interpretation prompt
+/backend/src/property_focus/analyzers/prompts/documents-v1.md Versioned rent roll, lease and expense extraction prompt
+/backend/scripts/export_openapi.py                  Deterministic schema exporter without live services
+/backend/scripts/check_boundaries.py                Import rules for domain/application/adapters
+/backend/scripts/check_fixture_secrets.py           Fixture, evidence and credential leak checks across the repository
+/backend/evals/config/baseline.yaml                 Dataset hashes, metrics and thresholds
+/backend/evals/reports/.gitkeep                     Report output directory marker
+/backend/tests/unit/test_identity.py                Matching, merges, units, relistings and confidence
+/backend/tests/unit/test_claims.py                  Statuses, resolution rules, provenance, human claims and scope
+/backend/tests/unit/test_ontology.py                Seed validation, lifecycle and coverage
+/backend/tests/unit/test_invalidation.py            Modes and ontology-change eligibility
+/backend/tests/unit/test_triggers.py                AUTO/MANUAL/EXPERIMENT records, quartile and anomaly rules
+/backend/tests/unit/test_preferences.py             Materiality, proposals, revert and interview state
+/backend/tests/unit/test_evaluation.py              Requirements, dimensions, penalties, coverage and reproducibility
+/backend/tests/unit/test_finance.py                 Comp selection, quantiles, value score, leakage and bid arithmetic
+/backend/tests/unit/test_underwriting.py            Duplex, vacancy basis, missing values and debt service
+/backend/tests/unit/test_ai.py                      Schema validation, router, fallback and accounting
+/backend/tests/unit/test_failures.py                Code-to-class mapping and retry policy
+/backend/tests/integration/test_ingestion.py        MIME, IMAP checkpoints, scheduled poll overlap and evidence writes
+/backend/tests/integration/test_tenancy.py          RLS, signed evidence URLs and adapter parity
+/backend/tests/integration/test_workflows.py        Retries, leases, outbox, launcher and budget races
+/backend/tests/integration/test_browser.py          Recorded browser pages and auth expiry
+/backend/tests/integration/test_telemetry.py        End-to-end trace linkage and log redaction
+/backend/tests/integration/test_recovery.py         Restore manifests and evidence integrity
+/backend/tests/integration/test_evidence_immutability.py Write-once and restore checks against the real dogfood bucket
+/backend/tests/contract/test_api.py                 OpenAPI responses and error contracts
+/backend/tests/contract/test_mcp.py                 Tool schemas, authorization and result parity
+/backend/tests/replay/test_golden_replay.py         Replay of retained email, page and evidence fixtures and golden set
+/backend/tests/live/test_providers.py               Opt-in live provider and mailbox checks
+/backend/tests/aws/test_pipeline.py                 Real AWS deployed smoke and redelivery
+/frontend/package.json                              @property-focus/web scripts and dependencies, including @axe-core/playwright and @rtk-query/codegen-openapi
+/frontend/index.html                                Vite entry document
+/frontend/vite.config.ts                            Build and proxy settings
+/frontend/tsconfig.json                             Strict web TypeScript settings
+/frontend/src/main.tsx                              React root
+/frontend/src/app/store.ts                          Redux store and RTK Query registration
+/frontend/src/app/router.tsx                        Routes and sign-in boundary
+/frontend/src/auth/session.ts                       PKCE session and token lifecycle
+/frontend/src/api/openapi.json                      Committed exported schema
+/frontend/src/api/codegen.ts                        RTK Query OpenAPI configuration
+/frontend/src/api/baseApi.ts                        Auth headers, errors and cache tags
+/frontend/src/api/generated.ts                      Generated endpoints and types
+/frontend/src/products/homebuyer/Layout.tsx         Homebuyer navigation and route group
+/frontend/src/products/homebuyer/Onboarding.tsx     Interview, household requirements and subscription creation
+/frontend/src/products/homebuyer/HomeFeed.tsx       Homebuyer feed under /homebuyer: requirements group, overall fit, unknowns
+/frontend/src/products/homebuyer/PropertyDetail.tsx Homebuyer property page: seven D10 sections, shortlist, visit questions, tours
+/frontend/src/products/investor/Layout.tsx          Investor navigation and route group (phase 8)
+/frontend/src/products/investor/Onboarding.tsx      Strategy, budget and financing assumptions
+/frontend/src/products/investor/AcquisitionFeed.tsx Investment criteria and incomplete estimates
+/frontend/src/products/investor/PropertyDetail.tsx  Shared D10 sections plus rent roll, expense evidence and scenario comparison
+/frontend/src/pages/AddProperty.tsx                 Manual add by URL or address
+/frontend/src/pages/Preferences.tsx                 Profile versions, proposals, approvals, revert, destinations
+/frontend/src/pages/Verification.tsx                VOI-ordered review queue and corrections
+/frontend/src/pages/Notifications.tsx               In-app inbox and channel settings
+/frontend/src/pages/Operations.tsx                  Role-gated failed work, credential state, costs and retry controls
+/frontend/src/pages/Valuation.tsx                   Distribution and comparable explanations
+/frontend/src/pages/OfferScenarios.tsx              Tenant scenario inputs, bids and outcomes
+/frontend/src/components/FitDimensions.tsx          Multidimensional fit with coverage and critical mismatches
+/frontend/src/components/InterviewPanel.tsx         Adaptive interview turns and proposal confirmation
+/frontend/src/components/DeepResearchPanel.tsx      Tier status, trigger reasons and deep findings
+/frontend/src/components/Timeline.tsx               Listing history, analysis runs and evaluation changes
+/frontend/src/components/EvidenceViewer.tsx         Authorized image/document display with region highlights
+/frontend/src/components/ResultStatus.tsx           PARTIAL, stale and UNKNOWN indicators
+/frontend/src/styles.css                            Accessible layout and status styles
+/frontend/tests/evaluation.test.tsx                 Fit dimensions and unknown presentation
+/frontend/tests/operations.test.tsx                 Replay confirmation and role controls
+/frontend/e2e/dogfood.spec.ts                       Sign-in, feed, evidence, preference, shortlist and feedback loop
+/frontend/e2e/products.spec.ts                      Same-account subscriptions and duplex strategy switch
+/frontend/e2e/accessibility.spec.ts                 axe scan and keyboard-only path for feed, dialogs and verification
+/ontology/schema/attribute.schema.json              JSON Schema for seed attribute definitions
+/ontology/v1.0.0/attributes.json                    Seed for ACTIVE v1: 75+ attributes across the D32 categories
+/ontology/v1.0.0/preference-definitions.json        Seed global preference definitions referencing v1 attributes (D34)
+/ontology/v1.1.0/attributes.json                    Phase 8 additive unit, lease and expense attributes
+/ontology/v1.1.0/preference-definitions.json        Phase 8 additive investor preference definitions
+/ontology/CHANGELOG.md                              Version compatibility and attribute migrations
+/infrastructure/docker/backend.Dockerfile           API, MCP, scheduler and task image build stages
+/infrastructure/docker/browser.Dockerfile           Pinned Playwright and browser task image
+/infrastructure/cdk/package.json                    @property-focus/infra build, synth, test and deployment scripts
+/infrastructure/cdk/cdk.json                        CDK app configuration
+/infrastructure/cdk/bin/property-focus.ts           App and environment selection
+/infrastructure/cdk/lib/data-stack.ts               RDS, S3, KMS and backup configuration
+/infrastructure/cdk/lib/identity-stack.ts           Cognito, web application client and public MCP client (PKCE)
+/infrastructure/cdk/lib/api-stack.ts                API Gateway, REST and MCP (/mcp) Lambdas and permissions
+/infrastructure/cdk/lib/workflow-stack.ts           Step Functions, task Lambdas, queues, EventBridge schedules (imap-poll each minute) and Fargate browser task
+/infrastructure/cdk/lib/observability-stack.ts      Dashboards, alarms and budget notifications
+/infrastructure/cdk/workflows/analyze.asl.json      Standard workflow definition (5–15 states)
+/infrastructure/cdk/test/security.test.ts           Public access, IAM and encryption assertions
+/infrastructure/cdk/test/workflow.test.ts           State count, retry, catch, timeout and reference-only payloads
+/infrastructure/dogfood/compose.yaml                DigitalOcean production override: api, mcp, scheduler, browser-task profile, otel stack
+/infrastructure/dogfood/scheduler.crontab           Minute schedules: imap-poll, outbox-sweep, dispatch, repair, invalidation-batch, backup
+/infrastructure/dogfood/Caddyfile                   TLS termination and routes for web, /v1 API and /mcp
+/infrastructure/dogfood/otel-collector.yaml         Collector pipeline to the self-hosted observability stack
+/infrastructure/dogfood/deploy.sh                   Pinned image deployment and health checks
+/infrastructure/dogfood/backup.sh                   Database and object backup entrypoint with retention
+/fixtures/mail/multipart.eml                        Synthetic multipart MLS email
+/fixtures/mail/duplicate.eml                        Duplicate delivery fixture
+/fixtures/themls/listing.html                       Synthetic recorded page
+/fixtures/themls/login.html                         Session-expired page
+/fixtures/golden/golden-properties.jsonl            Reviewed redacted/synthetic labeled property cases (D46)
+/fixtures/golden/manifest.json                      Golden set hashes, labels, rights and split assignment
+/fixtures/valuation/valuation-holdout.jsonl         Time-split sales, added when licensed
 ```
 
 Files to modify: none at project start. Later migrations MUST append new migration files rather than rewrite a released migration. Task specs MUST enumerate additional exact files before creating them.
 
-Off-limits: credentials, browser storage state, unredacted private email, licensed source corpora, production database contents, and another tenant's private records. Do not commit these to the repository or evaluation fixtures. Do not edit `/packages/api-client/src/generated.ts` by hand. Do not introduce `/.pvpd/` paths.
+Off-limits: credentials, browser profile and session state, unredacted private email, licensed source corpora, production database contents, and another tenant's private records. Do not commit these to the repository or to `/fixtures`. Do not edit `/frontend/src/api/generated.ts` by hand. Do not introduce `/.pvpd/` paths.
 
 ### Data model and invariants
 
-Use UUID primary keys, UTC `timestamptz`, integer monetary minor units with ISO currency, decimal ratios, explicit unit codes, and WGS84 coordinates. Include `created_at` and schema version on persisted versioned records. Avoid floating-point money arithmetic.
+Use UUID primary keys, UTC `timestamptz`, integer monetary minor units with ISO currency, decimal ratios, explicit unit codes, and WGS84 coordinates. Include `created_at` and schema version on persisted versioned records. Avoid floating-point money arithmetic. The relational core (D24) is `properties`, `listings`, `tenants`, `source_observations`, `claims`, `analysis_runs` and `property_evaluations`; JSONB holds evolving analyzer payloads and claim values. A state change writes current state, history, a domain event and an outbox event in one transaction (D25).
 
 | Table | Required fields and constraints |
 |---|---|
-| `tenants`, `users`, `memberships` | Membership unique on tenant/user; roles `member`, `reviewer`, `operator`; user identity bound to issuer/sub |
+| `tenants`, `users`, `memberships` | Membership unique on tenant/user; roles `member`, `reviewer`, `operator`; user identity bound to issuer/sub, independent of Cognito internals (D28) |
 | `source_accounts` | Tenant, provider, credential secret reference, entitlement group, browser session state (`HEALTHY`, `SESSION_EXPIRING`, `AUTH_REQUIRED`, `BLOCKED`); secret values absent |
-| `ingest_messages` | Account, mailbox, UIDVALIDITY, UID, raw evidence ID, digest, parse version, state; unique account/mailbox/UIDVALIDITY/UID |
-| `properties`, `property_aliases` | Stable ID, normalized address components, unit, country, provisional state; parcel anchors scoped by jurisdiction; alias and merge audit |
+| `ingest_messages` | Account, mailbox, UIDVALIDITY, UID, raw evidence asset ID, digest, parse version, state; unique account/mailbox/UIDVALIDITY/UID |
+| `properties`, `property_aliases` | Stable ID, normalized address components, unit, country, coordinates, provisional state, identity confidence; parcel anchors scoped by jurisdiction; alias and merge audit |
 | `property_units` | Stable unit ID, parent property FK, source aliases and unit label. The listing FK targets the sale property. Scope rent/occupancy claims to a unit and building expenses to the property. |
-| `listings`, `listing_aliases` | Property ID, source, source-account scope, external ID, episode key, first/last seen; unique scoped episode key |
-| `listing_snapshots` | Listing, effective source time, captured time, content hash, normalized JSONB, evidence ID; unique listing/content hash |
-| `evidence` | Scope/entitlement, subject, source locator, object key/version, SHA-256, media type, size, captured time, retention class; no update of object locator/digest |
-| `ontology_versions` | Version and digest, publication time, schema object reference; versions append-only |
-| `claims`, `claim_evidence` | Subject type/ID, field, typed JSONB value, ontology version, observation/validity time, confidence method/value, author/model, scope, supersedes; evidence join with locator |
-| `verification_events` | Claim/identity target, reviewer, correction claim ID, rationale, time; append-only |
-| `intelligence_profiles` | Subject type/ID, immutable revision, ontology/resolver versions, resolved values, claim IDs, component status, freshness, input digest, scope |
-| `searches` | Tenant, search ID, name, originating experience and current preference revision. One membership can access multiple searches and either product subject to the same access checks. |
-| `shortlist_entries` | Tenant, search and property foreign keys, saved by and saved at. Unique per search/property; private RLS. |
-| `preference_revisions` | Tenant, search ID, strategy, revision, ontology version, hard criteria, soft criteria, unknown policy, budget, financing assumptions for investor strategies, digest; append-only |
-| `match_results` | Tenant, search ID, property/profile revision, preference revision, scoring version, underwriting version and digest (null for `owner_occupy`), eligibility, score, coverage, reasons, input digest |
+| `listings`, `listing_aliases` | Property ID, source, source-account scope, external ID, episode key, current price/status, first/last seen; unique scoped episode key |
+| `listing_history` | Listing, changed fields, previous and new values, effective source time, source observation ID; append-only |
+| `source_observations` | Source kind (`EMAIL`, `BROWSER`, `MANUAL`, `DOCUMENT`, `PROVIDER`), source account, listing/property refs, effective source time, captured time, content hash, normalized JSONB, evidence asset IDs; unique source/listing/content hash; immutable |
+| `evidence_assets` | SHA-256 (object key `sha256/<first2>/<hex>`), media type, size, object version, source URL, provider, captured time, scope/entitlement, retention class; unique SHA-256 per scope; locator and digest never updated (D44) |
+| `evidence_asset_refs` | Evidence asset, property ID, listing ID, source observation ID; property/listing references separated from object bytes |
+| `ontology_versions` | Semantic version, state `DRAFT`/`ACTIVE`/`RETIRED`, digest, published_at, published_by; partial unique index allows one `ACTIVE`; non-`DRAFT` rows and their attributes immutable (D33) |
+| `ontology_attributes` | Ontology version FK, key, category, subject type, value type, unit (nullable for unitless), allowed values, resolution rule name, scalar rule parameters, default invalidation mode, description; unique version/key; rule name must exist in `resolution_rules.py` |
+| `preference_definitions` | Ontology version FK, key, lifestyle goals, satisfying attribute keys (FK to same-version attributes), utility function name from code registry, scalar parameters; unique version/key (D34) |
+| `claims`, `claim_evidence` | Property/unit/listing/location/market subject, attribute key, typed JSONB value, ontology version, provider, source type (`SOURCE`, `ANALYZER`, `HUMAN`, `PROVIDER`), observed time, confidence method/value, analysis run ID or author principal, scope; immutable. Evidence join carries locator kind (`ASSET`, `IMAGE_REGION`, `FLOORPLAN_REGION`, `TEXT_SPAN`, `RECORD`, `PROVIDER_RESPONSE`) and locator JSON (D12, D35) |
+| `verification_requests` | Target attribute/claim, VOI score and inputs, state, asked_at, answered claim ID; tenant-scoped when tied to a preference |
+| `analysis_runs` | Kind (analyzer/enricher/valuation/explanation), name, tier (`BASELINE`/`DEEP`), mode (`PUBLISHED`/`SHADOW`), provider, model, model version, prompt version, analyzer version, ontology version, computation key (unique), input evidence IDs, status (`COMPLETE`, `PARTIAL`, `FAILED`), confidence, tokens, cost, latency, result JSONB, workflow run ID; never updated after completion (D8, D14, D31) |
+| `intelligence_profiles` | Subject, immutable revision, ontology/resolver versions, resolved values with status, claim IDs, component status, completeness, input digest, scope |
+| `invalidations` | Subject, capability or attribute, cause (`SOURCE_CHANGE`, `ONTOLOGY_VERSION`, `ANALYZER_VERSION`, `HUMAN_CLAIM`, `TTL`), mode (`EVENT`, `LAZY`, `BATCH`, `MANUAL`), invalidated_at, resolved_by analysis run ID (D13) |
+| `analysis_triggers` | Property, tier, type (`AUTO`, `MANUAL`, `EXPERIMENT`), strategy name and version, reasons JSONB, requesting principal or search subscription, workflow run ID, created_at (D6) |
+| `preference_profiles`, `preference_versions` | Tenant; one `ACTIVE` profile per tenant (partial unique index, D5); versions append-only with ontology version, lifestyle goals, preferences (definition key, importance `critical`/`high`/`medium`/`low`, hard flag, acceptable alternatives), tradeoffs, examples, destinations (phase 6), dimension weights, unknown policy, origin (`EXPLICIT`, `LEARNED`, `INTERVIEW`, `REVERT`), evidence refs, digest |
+| `preference_proposals` | Profile, base version, diff, materiality (`LOW_IMPACT`, `MATERIAL`) with reasons, evidence feedback IDs, state (`PROPOSED`, `AUTO_APPLIED`, `AWAITING_APPROVAL`, `APPLIED`, `REJECTED`, `REVERTED`), resulting version, decided_by |
+| `interview_sessions` | Tenant, profile, state JSONB (captured goals, filled and open slots, pending examples, step), recent turns (last 6), status; private RLS (D15) |
+| `search_subscriptions`, `search_subscription_versions` | Tenant, name, experience; versions append-only with source, geography and listing criteria, notification policy, strategy (`owner_occupancy`, `live_in_and_rent`, `rental_hold`), strategy criteria (hard and soft), budget, financing assumptions, digest (D17) |
+| `shortlist_entries` | Tenant, search subscription and property FKs, saved by and saved at. Unique per subscription/property; private RLS. |
+| `property_evaluations` | Tenant, search subscription ID, property ID, intelligence profile revision, preference version, subscription version, ontology version, scoring version, underwriting version and digest (null for `owner_occupancy`), valuation ID (nullable), requirements status, dimension scores and coverage, critical mismatches, overall score, explanation reference, input digest; unique on input digest; private RLS (D9) |
+| `location_profiles` | Property, ontology version, location and traffic attribute claims, freshness, provenance (D42) |
+| `travel_time_results` | Tenant, property, destination digest, time window, mode, minutes, provider, computed_at; private RLS (D43) |
 | `market_profiles`, `comparable_sales` | Geography/class/time scope, sale date/price, rights, provenance; dedupe source sale ID; exclude future information from historical runs |
-| `valuations` | Property/profile, model/data versions, as-of, currency, quantiles, support, comps, assumptions, status |
-| `offer_scenarios` | Tenant, search ID, preference revision, strategy, selected owner unit if applicable, unit input revisions, valuation version, financial assumptions, scenario output, budget ceiling and version; private RLS |
-| `jobs`, `job_components`, `job_attempts` | Tenant/scope, kind, input digest, state, lease expiry, fencing token, failure, parent, timestamps, result references |
+| `valuations` | Property/profile, comp selector and model versions, as-of, currency, quantiles, central estimate, confidence, selected comps with similarity features, weights and reasons, list-price comparison, status (D39, D40) |
+| `offer_scenarios` | Tenant, search subscription ID, preference and subscription versions, strategy, selected owner unit if applicable, unit input revisions, valuation ID, financial assumptions, value/competitive/win-focused bids, walk-away threshold, binding constraints, version; private RLS |
+| `offer_outcomes` | Tenant, offer scenario, offered amount, result (`WON`, `LOST`, `WITHDRAWN`, `UNKNOWN`), final sale price if known, recorded_at; private RLS (D41) |
+| `workflow_runs`, `workflow_steps`, `step_attempts` | Tenant/scope, kind, tier, input digest, state (`QUEUED`, `RUNNING`, `COMPLETE`, `PARTIAL`, `WAITING_FOR_USER`, `FAILED`, `CANCELLED`), lease expiry, fencing token, failure class and code, parent, timestamps, result references |
 | `idempotency_records` | Scope, operation, key, request digest, state, result ID, lease; unique scope/operation/key |
-| `outbox_events`, `processed_events` | Event ID/version, aggregate revision, payload reference, publish state; consumer/event unique |
-| `notifications`, `notification_deliveries` | Tenant/user, event, result revision, channel, dedupe key, provider ID, state; channel dedupe unique |
-| `budget_reservations`, `usage_events` | Tenant/shared owner, property, job, analysis tier, analyzer, provider/model, estimate/actual, currency, tokens, duration, state; unique provider operation reference where available |
-| `feedback` | Tenant, search ID, property ID, principal, target revision, `kind` (`note` or `visit_question`), text, time; private RLS; `visit_question` requires non-empty text; feedback does not mutate source evidence |
+| `domain_events`, `outbox_events`, `processed_events` | Event ID/version, aggregate revision, payload reference, publish state; consumer/event unique |
+| `notifications`, `notification_deliveries` | Tenant/user, event, result revision, strategy (`EMAIL`, `IN_APP`), property deep link, dedupe key, provider ID, state; strategy dedupe unique |
+| `budget_reservations`, `usage_events` | Tenant/shared owner, property, workflow run, analysis run, analysis tier, cost category, analyzer, provider/model, estimate/actual, currency, tokens, duration, state; unique provider operation reference where available |
+| `feedback` | Tenant, search subscription ID, property ID, principal, target revision, `kind` (`note`, `visit_question`, `like`, `dislike`), text, time; private RLS; `visit_question` requires non-empty text; feedback does not mutate source evidence |
+| `tours` | Tenant, property, search subscription, visited_at, principal; private RLS |
 | `audit_events` | Tenant, principal, target revision, action, redacted metadata, time |
 
-Use indexes on scoped external IDs, subject/field/observation time, tenant/job state/created time, outbox pending time, and profile input digest. Add GIN JSONB indexes only for measured query patterns. Store polygons and spatial queries with PostGIS only if the first location source requires them; record the extension in migrations and compatibility tests.
+Use indexes on scoped external IDs, subject/attribute/observation time, tenant/workflow state/created time, outbox pending time, profile input digest and computation key. Add GIN JSONB indexes only for measured query patterns. Store polygons and spatial queries with PostGIS only if the first location source requires them; record the extension in migrations and compatibility tests.
 
 Tenant-private tables MUST have `tenant_id NOT NULL`, scoped foreign keys where appropriate, and forced RLS. Evidence shared through an entitlement group MUST require an explicit membership join. Database maintenance roles and backup roles require a documented separation from runtime roles.
 
 ### Requirements and acceptance criteria
 
-MUST: Bootstrap the pinned monorepo and enforce dependency direction in phase 0.
+MUST: Bootstrap the pinned monorepo in the D47 layout and enforce dependency direction in phase 0.
 - On a clean macOS arm64 or Linux x86_64 machine with Docker, the bootstrap commands below install dependencies, start local services, migrate an empty database and seed synthetic data without private credentials. `ci.yml` runs the bootstrap on a Linux x86_64 runner; the Foundation ready gate's clean-bootstrap log covers macOS arm64.
-- `check_boundaries.py` fails if domain imports an adapter or application imports REST/MCP.
+- The repository has top-level `/backend`, `/frontend`, `/infrastructure`, `/ontology`, `/fixtures`, `/specs` and `/docs`; `make check-layout` fails if `apps/`, `packages/`, `infra/` or `evals/` exist at the root.
+- `backend/scripts/check_boundaries.py` fails if domain imports an adapter or runtime module, or application imports REST/MCP.
 - CI runs `pnpm install --frozen-lockfile` and `uv sync --all-packages --frozen` before any check; a manifest change without a matching `pnpm-lock.yaml` or `uv.lock` update fails the build.
+- `backend`, `frontend` and `infrastructure/cdk` each build and test with their own commands without building the others.
 
-MUST: Authenticate and authorize REST, MCP, jobs, evidence retrieval and operations controls.
+MUST: Run CI path-aware with the D48 check set.
+- `ci.yml` runs Python lint/typecheck/tests, frontend lint/typecheck/tests, the OpenAPI generation check, the RTK Query generation check, replay/golden tests, CDK synth and the selected integration tests listed under Test strategy.
+- Path filters: `backend/**` runs backend, generation and replay jobs; `frontend/**` runs frontend and generation-check jobs; `infrastructure/**` runs CDK test and synth; `ontology/**` and `fixtures/**` run backend ontology, replay and golden jobs. A pull request that changes only `docs/**` or `specs/**` runs only the secret scan and markdown lint; a recorded CI run demonstrates this at the Foundation ready gate.
+
+MUST: Authenticate and authorize REST, MCP, tasks, evidence retrieval and operations controls.
 - A token for tenant A cannot read, infer existence of, mutate, export or obtain signed URLs for tenant B's private records.
 - Expired, wrong-audience, wrong-issuer and wrong-token-use tokens fail. MCP and REST return equivalent permitted results for the same principal and use case.
 - Operators need an explicit role and scope for retry, merge, source login, and budget changes; audit records identify actor and reason.
-- MCP serves streamable HTTP at `/mcp`. An unauthenticated MCP request returns 401 with a `WWW-Authenticate` header naming `/.well-known/oauth-protected-resource`, whose metadata names the Cognito issuer. A Cognito access token issued to the MCP app client through authorization code with PKCE succeeds, validated by the same `adapters/auth/cognito.py` checks as REST (`apps/backend/tests/contract/test_mcp.py`).
+- MCP serves streamable HTTP at `/mcp`. An unauthenticated MCP request returns 401 with a `WWW-Authenticate` header naming `/.well-known/oauth-protected-resource`, whose metadata names the Cognito issuer. A Cognito access token issued to the MCP app client through authorization code with PKCE succeeds, validated by the same `adapters/auth/cognito.py` checks as REST (`backend/tests/contract/test_mcp.py`).
+
+MUST: Execute work as on-demand task invocations, not always-on workers (D26).
+- Every background unit of work enters through `runtime/run_task.py` with a `TaskInput`; the same handler runs under `runtime/lambda_handler.py`, a Fargate task and a dogfood process. `backend/tests/integration/test_workflows.py` runs one handler through the dogfood launcher and the Lambda adapter and asserts identical committed results.
+- `infrastructure/dogfood/compose.yaml` defines no service whose command loops over queues or mailboxes; the scheduler service runs only `infrastructure/dogfood/scheduler.crontab` entries, each a `property_focus.cli run-task <kind>` process that exits. A test parses the compose file and crontab and fails on a long-running worker command.
+- Dogfood starts browser tasks with `docker compose run --rm browser-task` through a docker-socket proxy limited to create/start/wait/remove of the pinned browser image; ordinary tasks run as subprocesses of the scheduler container.
+
+MUST: Poll the MLS mailbox every 15–30 seconds through scheduled short-lived invocations in phase 1 (D22, D26).
+- EventBridge Scheduler (AWS) and the dogfood scheduler start `imap-poll` once per minute. The invocation polls at `IMAP_POLL_INTERVAL_SECONDS` (default 20, validated to 15–30), starts no poll after 45 seconds, and exits before 60 seconds.
+- A Postgres advisory lock prevents overlap: a second concurrent invocation exits without fetching (`test_ingestion.py`).
+- `imap-poll` stores raw MIME, the `ingest_messages` row and an outbox event, then exits; it does not parse. Parsing runs as a separate task launched from the outbox.
 
 MUST: Preserve and deduplicate MLS intake in phase 1.
-- Store raw MIME bytes with digest before parse success; malformed messages remain visible in operations with an evidence reference.
-- Re-deliver one UID, replay its parsed content, and deliver an equivalent message under another UID: intake records preserve delivery history while normalized listing/snapshot output remains deduplicated.
+- Store raw MIME bytes with digest before parse success; malformed messages remain visible in operations with an evidence reference. No LLM call occurs during email ingestion (`test_ingestion.py` asserts zero model-provider calls).
+- Re-deliver one UID, replay its parsed content, and deliver an equivalent message under another UID: intake records preserve delivery history while source observations and listing output remain deduplicated.
 - Resetting UIDVALIDITY rescans safely; malformed messages do not halt the mailbox; checkpoint advancement requires durable intake for the covered messages.
 
-MUST: Separate the experience, the search and the acquisition strategy.
-- Phase 5 ships Homebuyer onboarding, feed and property detail under `/homebuyer` (`products/homebuyer/HomeFeed.tsx`, `products/homebuyer/PropertyDetail.tsx`). Phase 8 ships equivalent Investor entry points under `/investor` with acquisition criteria, rent roll and cash-flow comparison. Both call the same generated client and application use cases.
-- Under one sign-in, create two searches with distinct preferences. Editing one search leaves the other ranking intact. Include search ID and revision in match caches, shortlist records, alerts and notification dedupe. Reuse authorized evidence without duplicating ingestion.
-- REST and MCP reject a preference revision from another search. Load search membership and input entitlements on the server regardless of the active route.
+MUST: Model every source as a `PropertySource` emitting source observations (D2).
+- The email parser, TheMLS browser, manual add and document upload each write `source_observations` and never insert `properties` directly; identity resolution creates or links properties afterward.
+- A field reported differently by two sources keeps both claims with their provider and source type.
 
-MUST: Let search members shortlist homes and flag visit questions in phase 5.
-- `PUT /searches/{search_id}/shortlist/{property_id}` returns `201` on the first save and `200` with the same entry on repeats; one row exists per search/property. `DELETE` on the same path returns `204`, also when no entry exists.
-- An entry saved in one search does not appear in `GET /searches/{other_search_id}/shortlist` for the same tenant. A tenant B token receives `404` for tenant A's search shortlist, both on read and on `PUT`.
-- `POST /properties/{id}/feedback` (D30) with `kind: visit_question` and non-empty `text` stores a private question for the search and property; `GET /searches/{search_id}/feedback?kind=visit_question&property_id=...` lists it; tenant B receives `404`. Empty `text` returns `422`.
-- `apps/backend/tests/contract/test_api.py` and `apps/backend/tests/integration/test_tenancy.py` cover these cases; `apps/web/e2e/dogfood.spec.ts` shortlists a home and flags a visit question from the Homebuyer property page.
+MUST: Allow manual property addition by URL or address from phase 1 (D17).
+- `POST /properties` with `{url}` from an allowlisted host or `{address}` returns `202 {property_id, workflow_run_id}` and creates a `MANUAL` source observation; an address resolving to an existing property links to it; a non-allowlisted URL returns `422` with code `unsupported_source`.
+- Phase 5 adds `frontend/src/pages/AddProperty.tsx`; `dogfood.spec.ts` adds a property by address.
 
-MUST: Resolve property and listing identities without destructive guesses.
+MUST: Separate the experience, the search subscription and the acquisition strategy.
+- Phase 5 ships Homebuyer onboarding, feed and property page under `/homebuyer` (`products/homebuyer/HomeFeed.tsx`, `products/homebuyer/PropertyDetail.tsx`). Phase 8 ships equivalent Investor entry points under `/investor` with acquisition criteria, rent roll and cash-flow comparison. Both call the same generated client and application use cases.
+- Under one sign-in, create two subscriptions with distinct strategy criteria. Editing one subscription leaves the other's evaluations intact; editing the shared PreferenceProfile recomputes evaluations for every subscription that applies it. Include subscription ID and version in evaluation caches, shortlist records, alerts and notification dedupe. Reuse authorized evidence without duplicating ingestion.
+- A tenant has exactly one `ACTIVE` preference profile; creating a second fails the partial unique index (`test_preferences.py`).
+- A `rental_hold` evaluation has `lifestyle_fit: null` and ignores household lifestyle requirements; `owner_occupancy` and `live_in_and_rent` evaluations apply the profile (plan recommendation pending the Risks row).
+- REST and MCP reject a subscription version from another subscription. Load subscription membership and input entitlements on the server regardless of the active route.
+
+MUST: Let subscription members shortlist homes, flag visit questions and record tours in phase 5.
+- `PUT /search-subscriptions/{subscription_id}/shortlist/{property_id}` returns `201` on the first save and `200` with the same entry on repeats; one row exists per subscription/property. `DELETE` on the same path returns `204`, also when no entry exists.
+- An entry saved in one subscription does not appear in `GET /search-subscriptions/{other_id}/shortlist` for the same tenant. A tenant B token receives `404` for tenant A's subscription shortlist, both on read and on `PUT`.
+- `POST /properties/{id}/feedback` (D30) with `kind: visit_question` and non-empty `text` stores a private question for the subscription and property; `GET /search-subscriptions/{subscription_id}/feedback?kind=visit_question&property_id=...` lists it; tenant B receives `404`. Empty `text` returns `422`.
+- `POST /properties/{id}/tours` records a visit and creates at most three post-tour verification requests, the highest VOI scores above the configured threshold (D37).
+- `backend/tests/contract/test_api.py` and `backend/tests/integration/test_tenancy.py` cover these cases; `frontend/e2e/dogfood.spec.ts` shortlists a home and flags a visit question from the Homebuyer property page.
+
+MUST: Resolve property and listing identities without destructive guesses (D4).
+- Identity resolution tries parcel identifier, then normalized address plus coordinates, then source IDs, and stores a confidence on every link.
 - A duplex offered in one sale produces one feed item with two child units. A lease or rent roll cannot create another sale listing. Unclear sale scope enters identity review.
 - Same parcel/jurisdiction links an existing property when unit/parcel evidence is consistent; different condominium units remain distinct.
 - A new marketing episode creates a listing linked to the same property. Ambiguous address-only matches enter review.
 - Merge and split fixtures retain aliases, evidence relationships and a reversible audit trail; source-ID reuse cannot erase prior episodes.
 
-MUST: Capture TheMLS pages through a credential-scoped browser worker in phase 2.
+MUST: Commit listing state changes with history and outbox atomically (D25).
+- A price change updates `listings`, inserts `listing_history`, `domain_events` and `outbox_events` in one transaction; a fault injected before commit leaves none of the four; the publisher sends only committed events (`test_workflows.py`).
+
+MUST: Capture TheMLS pages through a capability-based, credential-scoped browser task in phase 2.
+- `application/enrichment.py` selects an enricher by capability; the TheMLS browser registers `LISTING`, `PHOTOS`, `REMARKS` and `LISTING_HISTORY`. Requesting a capability with no registered provider marks the component `DEFERRED` with `DATA_UNAVAILABLE` and no error (D11).
+- A capability configured with a shadow provider records the shadow output as a `SHADOW` analysis run that never publishes claims.
 - Capture a recorded listing's normalized facts, source time, HTML and referenced media with stable evidence locators.
-- Expired-session fixture transitions to `waiting_for_user/auth_required` after one detection, emits one action notification, and resumes after operator-provided session refresh.
-- Concurrent jobs for one account serialize; expired lease holders cannot overwrite a newer session or job result.
-- Disallowed hosts, private IP redirects, oversized downloads and unsupported media fail with explicit classes and no internal network fetch.
+- Expired-session fixture transitions the source account to `AUTH_REQUIRED` and the workflow run to `WAITING_FOR_USER` after one detection, emits one action notification, and resumes after operator-provided session refresh.
+- Concurrent tasks for one account serialize; expired lease holders cannot overwrite a newer session or task result.
+- Disallowed hosts, private IP redirects, oversized downloads and unsupported media fail with explicit codes and no internal network fetch.
 
-MUST: Implement evidence integrity and access scope before analysis.
-- Attempted overwrite of a committed digest/object reference fails; re-fetch verifies SHA-256; signed downloads expire and check entitlement at issuance.
+MUST: Implement content-addressed evidence integrity and access scope before analysis (D44, D35).
+- Storing the same bytes twice yields one object at `sha256/<first2>/<hex>` and two `evidence_asset_refs` rows; attempted overwrite of a committed digest/object reference fails; re-fetch verifies SHA-256; signed downloads expire and check entitlement at issuance.
+- Every inferred claim has at least one `claim_evidence` row with a durable evidence asset ID and locator; inserting an `ANALYZER` claim without evidence fails a database constraint.
 - A correction creates another record and preserves the prior evidence. A deletion/retention procedure records tombstones and invalidates dependent published views where source rights require removal.
-- `infra/cdk/test/security.test.ts` asserts S3 versioning, a deny-overwrite/delete policy for runtime roles, and Object Lock only on evidence classes that `source-rights.md` permits. An Object Lock policy must not prevent a required licensed-data deletion without a reviewed policy decision.
-- `make storage-check ENV=dogfood` runs `apps/backend/tests/integration/test_evidence_immutability.py` against the real DigitalOcean evidence bucket. A runtime-credential overwrite or delete of a committed object fails or leaves the recorded version readable with its recorded SHA-256; objects restored from the independent backup match their recorded digests. A MiniStack run of the same test does not count.
+- `infrastructure/cdk/test/security.test.ts` asserts S3 versioning, a deny-overwrite/delete policy for runtime roles, and Object Lock only on evidence classes that `source-rights.md` permits. An Object Lock policy must not prevent a required licensed-data deletion without a reviewed policy decision.
+- `make storage-check ENV=dogfood` runs `backend/tests/integration/test_evidence_immutability.py` against the real DigitalOcean evidence bucket. A runtime-credential overwrite or delete of a committed object fails or leaves the recorded version readable with its recorded SHA-256; objects restored from the independent backup match their recorded digests. A MiniStack run of the same test does not count.
 
-MUST: Publish ontology and claim resolution versions in phase 3.
-- Validate field, type, unit, enum and subject compatibility. Reject unsupported fields or preserve them only in raw source payloads.
-- Resolve a conflict from a fixed fixture with a deterministic versioned rule and retain both claims.
-- Profile output includes value status, evidence/claim IDs, input digest, scope, ontology version and resolver version; replaying identical inputs and versions yields the same canonical output digest.
-- Ontology breaking changes create a new major version and explicit migration mapping; no silent reinterpretation of old claims.
+MUST: Store the ontology in Postgres as immutable versions in phase 3 (D32, D33).
+- `cli ontology load ontology/v1.0.0` validates the seed against `ontology/schema/attribute.schema.json` and inserts a `DRAFT` version; `cli ontology publish <version>` makes it `ACTIVE` and the prior `ACTIVE` version `RETIRED` in one transaction. Updating a non-`DRAFT` version's attributes fails.
+- ACTIVE v1 contains at least 75 attributes, each with category, subject type, value type, unit or explicit unitless marker, allowed values for enumerated types, and a resolution rule name registered in `domain/resolution_rules.py`. Each of the twelve categories `structure`, `rooms`, `layout`, `indoor_outdoor`, `yard`, `garage`, `condition`, `kitchen`, `architecture`, `location`, `risks`, `development_potential` has at least one attribute (`test_ontology.py`).
+- A seed whose rule parameter is not a scalar, or whose rule name is not registered, fails load; JSONB holds no expressions.
+- Every `analysis_runs` and `claims` row records the ontology version; `GET /properties/{id}/intelligence` returns it.
+- A breaking change creates a new major version with an explicit attribute mapping; old claims are never reinterpreted.
+
+MUST: Resolve claims to the four value statuses in phase 3 (D7, D12, D36).
+- Every resolved value carries `status` of `OBSERVED`, `INFERRED`, `UNKNOWN` or `CONFLICTING`, plus value, confidence, evidence IDs and the analyzer version of the winning claim. No other status token exists in schemas or code (`test_claims.py` enumerates the type).
+- A missing attribute resolves to `UNKNOWN` and never evaluates as false in any requirement or score.
+- A fixed conflict fixture resolves deterministically under the attribute's rule and retains both claims; an unresolvable conflict yields `CONFLICTING`.
+- A `HUMAN` claim outranks `ANALYZER` claims for attributes whose rule is `human_first_for_visible`; for attributes using `official_record_first` it does not outrank an assessor claim unless it attaches supporting evidence. The original analyzer claim and run remain.
+- Profile output includes value status, evidence/claim IDs, input digest, scope, completeness, ontology version and resolver version; replaying identical inputs and versions yields the same canonical output digest.
+
+MUST: Track invalidation separately from recomputation in phase 3 (D13).
+- A source price change writes an `EVENT` invalidation and launches recomputation of dependent components only; an attribute with `LAZY` mode recomputes on the next read of the profile; publishing a new ontology version writes `BATCH` invalidations for affected attributes and starts no analysis run until `invalidation-batch` runs; `MANUAL` waits for `POST /properties/{id}/reanalyze` (`test_invalidation.py`).
+- A stale value displays its invalidation time and keeps its status; staleness is not a value status.
+
+MUST: Run two analysis tiers with recorded triggers (D1, D6, D53).
+- Phase 3: every property that survives the pre-filter receives a `BASELINE` run (TextAnalyzer, PhotoAnalyzer, ConditionAnalyzer, KitchenAnalyzer). `POST /properties/{id}/deep-analysis` creates a `MANUAL` trigger and a `DEEP` run (FloorplanAnalyzer, LayoutAnalyzer, plus later deep components).
+- Phase 4: `domain/triggers.py` strategy `deep_trigger_v1` writes an `AUTO` trigger when a property's overall score is at or above the 75th percentile of that subscription's baseline overall scores over the trailing 30 days and its requirements status is not `fail`, or when an anomaly rule fires (list price drop of 5% or more; `CONFLICTING` hard-requirement attribute; from phase 7, list price below valuation p10). Each trigger stores type, strategy name and version, and reasons.
+- On the golden replay corpus, `AUTO` triggers fire for 20–30% of baseline-evaluated properties, excluding anomaly triggers; the evaluation report records the rate.
+- The evaluation harness can create `EXPERIMENT` triggers for properties rejected by the pre-filter; these runs charge the `EXPERIMENT` tier budget and do not notify users.
+- A property appears in `GET /properties` with listing facts and requirements evaluated before any analyzer completes; its intelligence shows tier status `PENDING`/`PARTIAL`/`COMPLETE` per tier.
+
+MUST: Apply a deterministic hard pre-filter before paid analysis in phase 4 (D3).
+- `domain/funnel.py` stage `prefilter_v1` evaluates listing-fact claims against the hard requirements of every active subscription across all tenants; a property with known facts failing every subscription gets no `BASELINE` paid call; pass or unknown for any subscription lets it survive.
+- The stage runs without an LLM in unit tests, records its version on each decision, and can run a candidate version in shadow, reporting disagreements without changing outcomes.
+
+MUST: Implement specialized, versioned analyzers behind a model router (D14, D31).
+- Each analyzer in `analyzers/` declares name, version, tier, required capabilities, input evidence kinds and output attribute keys; an output claim for an undeclared key fails validation.
+- Every `analysis_runs` row records provider, model, model version, prompt version, analyzer version, ontology version, tokens, cost, latency, confidence and structured result.
+- `adapters/ai/router.py` selects a provider by capability (`VISION`, `STRUCTURED_OUTPUT`, `TEXT`) and model policy; a request for a capability no configured provider offers returns `unsupported_capability` before a paid call.
+- Identical computation keys (input evidence digests plus analyzer, prompt, model and ontology versions) reuse the existing run; changing any one creates a new run (D54).
 
 MUST: Implement bounded, provider-independent AI calls with structured validation.
-- A fake provider can exercise analyzers without network access; two real adapters pass the same capability contract in `apps/backend/tests/unit/test_ai.py` before the AWS ready gate (phase 9), or earlier when a second provider enters use.
+- A fake provider can exercise analyzers without network access; two real adapters pass the same capability contract in `backend/tests/unit/test_ai.py` before the AWS ready gate (phase 9), or earlier when a second provider enters use.
 - Invalid output is rejected; permit one bounded repair attempt under budget, then classify `schema_invalid` and preserve safe metadata.
 - Record provider, model, prompt hash, schema hash, input evidence IDs, usage, latency and result digest. Do not log private source text.
 - A malicious instruction embedded in email or HTML cannot call tools, change the schema, access credentials or authorize a write.
 
-MUST: Implement deterministic hard filters and scores in phase 4.
-- Fixed profile/preference/scoring revisions produce identical eligibility, score, coverage and explanation digest.
-- Hard false yields fail; hard unknown yields unknown unless another criterion fails, in which case fail takes precedence. Hard pass requires all hard criteria true.
-- Exclude failed homes from confirmed-match ranking. Display unknown homes as a distinct review state.
-- Validate weights as nonnegative with positive total. Calculate `score = 100 * sum(weight * known_utility) / sum(all_weights)` and `coverage = sum(known_weights) / sum(all_weights)`; preserve component contributions and round only the display value.
-- Missing, stale and disputed values follow the frozen missing-data policy and cannot silently pass hard requirements.
-- From phase 8, for `rental_hold` and `live_in_and_rent` searches, `application/matching.py` calls `domain/underwriting.py` with the preference revision's budget and financing assumptions and the property's resolved unit and expense values. Criteria on `underwriting.net_operating_income` and `underwriting.cash_flow` then evaluate like any other field; a null underwriting output yields `unknown`. `match_results` stores the underwriting version and digest, and `test_matching.py` asserts identical results for identical inputs.
+MUST: Prioritize human verification by value of information (D37).
+- `domain/verification.py` computes `voi = uncertainty * importance * decision_impact`, where uncertainty is `1 - confidence` (1 for `UNKNOWN` and `CONFLICTING`), importance is the max normalized preference weight referencing the attribute across the tenant's active subscriptions (1 for hard requirements), and decision impact is the absolute change in overall score or requirements status between the attribute's best and worst allowed values.
+- `GET /verifications` orders by VOI descending and omits requests below `VOI_ASK_THRESHOLD`; an uncertain attribute that no preference references is never asked.
+
+MUST: Version the PreferenceProfile and gate material changes in phase 4 (D16, D34).
+- `PATCH /preferences/{id}` with `If-Match` creates a new immutable `preference_versions` row and returns `200` with it; prior versions remain readable through `GET /preferences/{id}/versions`; a stale ETag returns `412`.
+- `domain/preferences.py` classifies a diff as `MATERIAL` when it adds, removes or edits a hard requirement; changes geography or budget (subscription fields); changes importance to or from `critical`; adds, removes or edits a tradeoff that involves a hard or `critical` preference; changes any dimension weight; or moves a soft weight by more than 0.05 normalized share, or cumulative learned drift exceeds 0.10 since the last explicit approval. Everything else is `LOW_IMPACT`. Table-driven tests cover each rule.
+- A member's `PATCH` with a `MATERIAL` diff returns `409` with code `material_change_requires_confirmation` and the material items unless the body sets `confirm_material: true`.
+- Learned updates from feedback create `preference_proposals`: `LOW_IMPACT` proposals apply automatically as a version with origin `LEARNED` and their evidence feedback IDs; `MATERIAL` proposals wait as `AWAITING_APPROVAL` until `POST /preferences/{id}/proposals/{proposal_id}/approve` or `/reject`.
+- `POST /preferences/{id}/revert` with `{version}` creates a new version whose content digest equals the target version's.
+- Each preference references a definition in `preference_definitions` for the profile's ontology version; a reference to an unknown definition returns `422`.
+
+MUST: Run the adaptive preference interview with explicit state in phase 4 (D15).
+- `POST /preferences/{id}/interview-sessions` starts a session; `POST /interview-sessions/{id}/answers` returns the next questions and any proposals. Structured questions fill the required slots (geography, budget, bedrooms, property type, deal-breakers) before free conversation.
+- The model request contains the session state object and at most the last 6 turns; `test_preferences.py` asserts that turn 20's request payload is no larger than turn 7's plus the size of the state delta.
+- Proposals from the interview link each lifestyle goal to preferences, satisfying ontology attributes, importance and tradeoffs, and example properties; they apply only through the proposal approval path.
+
+MUST: Implement deterministic multidimensional evaluation in phase 4 (D9).
+- Fixed profile, preference, subscription and scoring versions produce identical requirements status, dimension scores, coverage, critical mismatches, overall score and explanation-input digest.
+- Requirements: hard false yields `fail`; hard unknown yields `unknown` unless another criterion fails, in which case `fail` takes precedence; `pass` requires all hard criteria true.
+- For each scored dimension D in {lifestyle_fit, property_quality, value}: validate weights as nonnegative with positive total; `score_D = 100 * sum(weight * known_utility) / sum(all_weights)` and `coverage_D = sum(known_weights) / sum(all_weights)`. Unknown, `CONFLICTING` and stale values follow the frozen unknown policy and cannot silently pass hard requirements.
+- Critical mismatches list every `critical`-importance preference whose known utility is 0. `overall = max(0, sum(dim_weight * score_D) / sum(dim_weight over applicable D) - CRITICAL_PENALTY * count(critical_mismatches))`; scoring version `scoring_v1` (phase 4) uses lifestyle 0.6 and property quality 0.4 with `CRITICAL_PENALTY = 15`; `scoring_v2` (phase 7) adds value with lifestyle 0.5, quality 0.25, value 0.25. Weights come from the profile's dimension weights when set.
+- `analyzers/explanation.py` receives only the computed evaluation and cited claims; its output text is stored separately and changing it cannot change any number. A test with a fake provider returning numbers in text asserts unchanged scores.
+- Exclude `fail` homes from the default feed. `GET /properties?search_subscription_id=` orders by requirements group (`pass`, `unknown`, `fail`), then overall descending, then `id`.
+- From phase 8, for `rental_hold` and `live_in_and_rent` subscriptions, `application/evaluation.py` calls `domain/underwriting.py` with the subscription version's budget and financing assumptions and the property's resolved unit and expense values. Criteria on `underwriting.net_operating_income` and `underwriting.cash_flow` then evaluate like any other attribute; a null underwriting output yields `unknown`. `property_evaluations` stores the underwriting version and digest, and `test_evaluation.py` asserts identical results for identical inputs.
 - A `live_in_and_rent` hard criterion on `unit.available_at_closing` passes when at least one unit is `true`, fails when every unit is `false`, and is `unknown` otherwise. Unknown homes appear in the verification feed, never among confirmed matches.
 
 MUST: Keep reusable intelligence separate from tenant decisions.
-- Two authorized tenants may reuse a rights-cleared property profile, while their match results, preference revisions and offer scenarios differ and remain private.
+- Two authorized tenants may reuse a rights-cleared property profile, while their evaluations, preference versions, destinations, travel times and offer scenarios differ and remain private.
 - A profile built from restricted tenant evidence is not served to another tenant through shared cache lookup.
-- Changing preferences recomputes matching without recapturing unchanged source evidence; changing an ontology or analyzer creates a new profile revision.
+- Changing preferences recomputes evaluations without recapturing unchanged source evidence or rerunning analyzers; changing an ontology or analyzer version creates a new profile revision.
+
+MUST: Deliver location intelligence and tenant travel times in phase 6 (D42, D43).
+- The location subsystem writes claims for the location and traffic attributes in ontology v1, including `location.traffic_level`, `location.functional_class`, `location.estimated_daily_traffic`, `location.through_traffic_likelihood`, `location.lane_count`, `location.speed_limit`, `location.signal_proximity`, `location.truck_traffic`, `location.cut_through_risk` and `location.cul_de_sac`, each `OBSERVED` when measured and `INFERRED` when estimated.
+- `location.traffic_level` (`QUIET`, `MODERATE`, `BUSY`) is a first-class attribute usable in hard and soft preferences.
+- Destinations in the preference version carry label, kind (`work`, `school`, `family`, `gym`, `airport`, `other`), location, time windows (weekday set plus arrive-by or depart-at time), mode and importance. Travel times are computed per property, destination and window and stored in `travel_time_results`; tenant B cannot read tenant A's destinations or results (`test_tenancy.py`).
+- Changing a destination recomputes only that tenant's travel times and evaluations.
 
 MUST: Deliver the phase 5 user loop with graceful partial results.
-- A user can sign in, inspect the feed, open evidence, inspect fit reasons and unknowns, edit preferences, and submit a correction.
+- A user can sign in, run the interview, inspect the feed, open evidence, inspect fit dimensions and unknowns, edit preferences, approve a proposal, and submit a correction.
+- The property page renders the sections Summary, Photos, Personal Fit, Property Intelligence, Deep Research, Timeline and Feedback (D10); `dogfood.spec.ts` asserts each heading. Every notification links to `/homebuyer/properties/{id}` (or the Investor equivalent).
 - A location timeout leaves property facts visible with component status, last success time and retry information. The UI does not use color alone to convey eligibility or failure.
-- `apps/web/e2e/accessibility.spec.ts` (run by `make test-e2e`) scans the feed, property detail dialogs and verification views with `@axe-core/playwright` and reports zero serious or critical violations. The same spec completes feed, evidence dialog and verification correction using the keyboard alone.
+- `frontend/e2e/accessibility.spec.ts` (run by `make test-e2e`) scans the feed, property page dialogs and verification views with `@axe-core/playwright` and reports zero serious or critical violations. The same spec completes feed, evidence dialog and verification correction using the keyboard alone.
 
 MUST: Route REST and MCP through application use cases.
-- Contract tests compare canonical results for `get_property`, `evaluate_match`, `request_analysis`, `get_job` and `create_search` through both adapters; from phase 8 they add `create_offer_scenario` and `get_offer_scenario`.
+- Contract tests compare canonical results through both adapters for `list_properties`, `get_property`, `get_property_intelligence`, `get_property_evaluation`, `add_property`, `request_deep_analysis`, `request_reanalysis`, `get_workflow_run`, `get_preferences`, `update_preferences` and `create_search_subscription`; from phase 8 they add `create_offer_scenario` and `get_offer_scenario`.
 - Transport modules contain validation/serialization and authentication binding; domain calculations remain outside adapters.
 - Regeneration of the OpenAPI schema and RTK Query client produces no uncommitted diff after a clean build.
 
-MUST: Implement durable, idempotent jobs and outbox delivery before paid or external work.
-- Crash after database commit but before publish, after publish but before acknowledge, and after provider success but before job completion: retries preserve one committed domain result and account for possible provider-side ambiguity.
+MUST: Implement durable, idempotent workflow runs and outbox delivery before paid or external work (D54).
+- Crash after database commit but before publish, after publish but before acknowledge, and after provider success but before workflow step completion: retries preserve one committed domain result and account for possible provider-side ambiguity.
 - Duplicate queue delivery uses a unique idempotency key; same key/different input returns conflict. Lease expiry permits recovery and fencing tokens reject stale completion.
-- Cancelled jobs publish no new profile after cancellation wins the commit race; preserve already committed evidence and usage.
+- Notification replay, email redelivery and workflow retry each produce one committed effect, enforced by database uniqueness constraints listed in the data model.
+- Cancelled workflow runs publish no new profile after cancellation wins the commit race; preserve already committed evidence and usage.
 
-MUST: Apply failure taxonomy, bounded retries and operations recovery.
-- Each failed component stores stable code, retryability, safe explanation, attempt count and correlation ID.
-- Retry transient failures with exponential backoff and jitter, honor provider Retry-After, cap attempts at four including the initial attempt, and cap elapsed work by job deadline.
-- Schema defects, authorization failures, exhausted budgets and invalid inputs do not enter generic retry loops. Dead-lettered work appears in operations with scoped replay and audit.
+MUST: Apply the D55 failure taxonomy, bounded retries and operations recovery.
+- Every stable code in `domain/errors.py` maps to exactly one class in {`TRANSIENT`, `AUTH_REQUIRED`, `DATA_UNAVAILABLE`, `INVALID_INPUT`, `PERMANENT`, `BUG_UNKNOWN`} or is marked non-failure; `test_failures.py` fails on an unmapped code.
+- Each failed step persists failure class, stable code, retryability, safe explanation, attempt count and correlation ID in `workflow_steps`.
+- Retry only `TRANSIENT` failures automatically, with exponential backoff and jitter, honoring provider Retry-After, capped at four attempts including the initial attempt and by the workflow deadline. `AUTH_REQUIRED` pauses dependent work; `DATA_UNAVAILABLE` resolves to `UNKNOWN` and retries on the invalidation schedule; `INVALID_INPUT`, `PERMANENT` and `BUG_UNKNOWN` never retry automatically.
+- `GET /ops/workflow-runs` and `pages/Operations.tsx` list failed work by class with scoped, audited replay.
 
-MUST: Enforce cost reservations and attribution from the first paid analyzer call in phase 3; add budget controls in phase 5.
-- Phase 3: `application/budgets.py` reserves estimated spend in `budget_reservations` before every provider call against the tenant's hard budget for the call's analysis tier, configured in `config.py`; analyzers contain no cost limits (D56). Each usage event records property, job, analyzer, model and provider. Concurrent tasks cannot reserve more than the available budget (`test_jobs.py`); reservations expire or reconcile after uncertain outcomes through a repair job.
-- Every paid operation has one usage event linked to its job and payer; shared costs have an explicit owner rather than duplicate full charges to multiple tenants.
-- Exhausted budget prevents new optional provider calls, marks those components deferred and leaves ingestion and existing-result access usable.
-- Phase 5: `GET /ops/costs` and `pages/Operations.tsx` show estimated versus actual usage, missing provider prices, and budget reset timezone; an operator with budget-change scope adjusts limits with an audit record. Do not report an unknown cost as zero.
+MUST: Enforce cost reservations and attribution from the first paid analyzer call in phase 3; add budget controls in phase 5 (D56).
+- Phase 3: `application/budgets.py` reserves estimated spend in `budget_reservations` before every provider call against the tenant's budget for the call's analysis tier (`BASELINE`, `DEEP`, `EXPERIMENT`), configured in `config.py`; analyzers contain no cost limits. Each usage event records property, workflow run, analysis run, cost category, analyzer, model and provider. Concurrent tasks cannot reserve more than the available budget (`test_workflows.py`); reservations expire or reconcile after uncertain outcomes through a repair task.
+- Every paid operation has one usage event linked to its workflow run and payer; shared costs have an explicit owner rather than duplicate full charges to multiple tenants.
+- Exhausted budget prevents new optional provider calls, marks those components `DEFERRED` and leaves ingestion and existing-result access usable.
+- Evaluation reports include cost and latency per property next to quality metrics for every compared version.
+- Phase 5: `GET /ops/costs` and `pages/Operations.tsx` show estimated versus actual usage by tier, category, analyzer and provider, missing provider prices, and budget reset timezone; an operator with budget-change scope adjusts tier limits with an audit record. Do not report an unknown cost as zero.
 
-MUST: Provide email and in-app notifications with deduplication.
-- Replaying an event does not duplicate the in-app record; email dedupe uses result/event revision plus recipient/channel and records ambiguous provider outcomes.
-- User opt-out, digest window and cooldown affect dispatch; source login failures notify once per unresolved episode.
+MUST: Provide email and in-app notifications through `NotificationStrategy` with deduplication (D51).
+- `EmailNotificationStrategy` and `InAppNotificationStrategy` implement one `NotificationStrategy` protocol; adding a strategy requires no change to `application/notifications.py` selection logic (a test registers a fake strategy).
+- Replaying an event does not duplicate the in-app record; email dedupe uses result/event revision plus recipient/strategy and records ambiguous provider outcomes.
+- User opt-out and the subscription's notification policy (threshold, digest window, cooldown) affect dispatch; source login failures notify once per unresolved episode.
 - Notification content does not disclose private financial details; deep links require authenticated authorization.
 
-MUST: Deploy through GitHub Actions with a secrets strategy.
-- CI scans committed files and fixtures for secrets; cloud deployments use GitHub OIDC with scoped roles and protected production environments.
-- Store production application secrets in AWS Secrets Manager; store dogfood secrets in a restricted encrypted host provisioning mechanism with an out-of-band recovery copy. Use parameter/config storage for nonsecret settings.
-- Keep browser session state encrypted outside Git and logs. Rotating a source credential invalidates affected sessions without losing evidence.
-- Build once, tag with commit and digest, promote the same image, run migrations as one controlled job, then run smoke checks. Roll back application images without reversing destructive schema changes; use expand/contract migrations.
+MUST: Deploy through GitHub Actions with a portable secrets strategy (D49).
+- Application code reads secrets only through the `SecretProvider` port by logical name; AWS uses Secrets Manager for secrets and Parameter Store or environment for configuration; dogfood uses deployment-injected values.
+- CI scans committed files, `/fixtures` and evidence fixtures for secrets; cloud deployments use GitHub OIDC with scoped roles and protected production environments.
+- Keep browser profile and session state encrypted outside Git and logs. Rotating a source credential invalidates affected sessions without losing evidence.
+- A test seeds known secret values and asserts they never appear in logs, model request payloads, analysis run records or stored evidence.
+- Build once, tag with commit and digest, promote the same image, run migrations as one controlled task, then run smoke checks. Roll back application images without reversing destructive schema changes; use expand/contract migrations.
 
-MUST: Install telemetry, backup and recovery controls before dogfood release.
-- Correlate REST/MCP request ID, job ID, event ID and provider call ID; export redacted OTel traces, metrics and structured logs to the environment's collector and CloudWatch in AWS.
-- Alert on oldest queue age, intake lag, credential failure, repeated parser failure, DLQ growth, job latency, error rate, database saturation and budget exhaustion. Initial thresholds are configurable and documented, then tuned from pilot observations.
-- Restore an independent backup into an isolated environment; verify relational counts, evidence manifests/digests, and decryption access. Record measured RPO/RTO against 24-hour/8-hour initial objectives.
+MUST: Install telemetry, backup and recovery controls before dogfood release (D50, D52).
+- Replaying `fixtures/mail/multipart.eml` produces one trace, linked across async hops with span links, containing spans for ingestion, property resolution, workflow, analysis run, model call, claim write and notification (`test_telemetry.py`). Logs are structured JSON with trace and correlation IDs; email bodies, cookies, tokens and financial details are redacted.
+- AWS exports to CloudWatch; dogfood exports through `infrastructure/dogfood/otel-collector.yaml` to a self-hosted stack.
+- Alert on oldest queue age, intake lag, credential failure, repeated parser failure, DLQ growth, failed-work count by class, workflow latency, error rate, database saturation and budget exhaustion. Initial thresholds are configurable and documented, then tuned from pilot observations.
+- `infrastructure/dogfood/backup.sh` backs up Postgres and evidence storage daily to off-server storage, keeps 30 daily copies and 12 monthly snapshots, and fails if the latest backup is older than 26 hours.
+- A restore drill runs before the Dogfood ready gate and quarterly afterward: restore into an isolated environment; verify relational counts, evidence manifests/digests and decryption access; record measured RPO/RTO against 24-hour/8-hour initial objectives in `docs/operations.md`.
 
 MUST: Establish real AWS compatibility before AWS release.
-- Deploy CDK stacks into an isolated account/environment and exercise S3, SQS redelivery/DLQ, EventBridge schedule, Step Functions retries/catches, Lambda auth and Fargate browser launch.
+- Deploy CDK stacks into an isolated account/environment and exercise S3, SQS redelivery/DLQ, the EventBridge `imap-poll` schedule, Step Functions retries/catches, Lambda auth and Fargate browser launch.
+- `infrastructure/cdk/test/workflow.test.ts` asserts `analyze.asl.json` has between 5 and 15 states, and no Temporal dependency exists in any manifest (D21).
 - Bound Lambda task runtime below its configured timeout; use references rather than HTML/media in workflow state. Use capped database pools and RDS Proxy only if concurrency measurements justify it.
-- `compatibility.md` records operation, pinned emulator version, local result, AWS result and fallback. An unsupported emulator operation cannot count as an AWS pass.
+- `docs/compatibility.md` records operation, pinned emulator version, local result, AWS result and fallback. An unsupported emulator operation cannot count as an AWS pass.
 
-MUST: Evaluate changes using golden properties and shadow runs.
-- Version dataset manifests with evidence hashes, labels, consent/rights and split assignment. Freeze historical as-of times to prevent future-data leakage.
-- Report identity precision, field-level correctness/abstention, hard-filter false passes, ranking changes, evidence support, latency and cost; target zero false passes in the curated hard-filter gate.
-- Shadow runs cannot publish profiles, change rankings or send user notifications. Promotion requires a report and maintainer action; regression blocks automatic promotion.
+MUST: Evaluate changes using deterministic, replay and live test layers, golden properties and shadow runs (D45, D46).
+- `fixtures/golden/manifest.json` versions the golden set with evidence hashes, labels, reviewer, consent/rights and split assignment; adding a case requires a reviewer field. Freeze historical as-of times to prevent future-data leakage.
+- Report identity precision, field-level correctness/abstention, hard-filter false passes, evaluation changes, evidence support, trigger rate, cost and latency; target zero false passes in the curated hard-filter gate.
+- The harness accepts any versioned analyzer, resolver, comp selector, valuation model, trigger strategy or scoring strategy; shadow runs cannot publish profiles, change evaluations or send user notifications. Promotion requires a report and maintainer action; regression blocks automatic promotion.
+- Human corrections (`HUMAN` claims) feed the ground-truth set for the attributes they cover.
 
-MUST: Gate probabilistic valuation and tenant offer strategy in phases 7 and 8.
+MUST: Gate probabilistic valuation and tenant offer strategy in phases 7 and 8 (D38–D41).
+- Comp selection is deterministic: `domain/valuation.py` scores candidates on micro-location, sale recency, living area, lot size, bed/bath configuration, architecture, condition, views, pool, garage and layout quality with versioned weights; each valuation stores the selected comps, each comp's per-feature similarity and weight, and a reason string. `GET /properties/{id}/intelligence` exposes them.
+- Return central estimate (p50), likely range (p10/p90, ordered), confidence (`HIGH`, `MEDIUM`, `LOW` plus the interval-width ratio), currency, as-of time, list-price comparison (difference and list price's percentile within the distribution), comparable IDs, support and model version; return `insufficient_data` when support policy fails.
+- Value dimension: `raw = 100 * P(V >= list_price)` interpolated from the quantiles; `confidence_factor = clamp(1 - ((p90 - p10) / p50) / MAX_WIDTH_RATIO, 0, 1)` with `MAX_WIDTH_RATIO = 0.5`; `score_value = 50 + (raw - 50) * confidence_factor`. Two valuations with equal p50 above list price and different widths yield different value scores, the narrower one higher (`test_finance.py`).
+- Backtest on time-separated held-out sales; report median absolute percentage error, bias and empirical p10-p90 coverage, including sparse segments. Store release thresholds in `evaluation-policy.md` before promotion; do not pick them after seeing candidate performance.
 - In phase 8, accept a permitted rent roll, lease or expense statement through `POST /properties/{id}/documents` as immutable evidence and create dated unit claims for occupancy, lease end, contractual rent and rent period. Keep collected and projected rent as distinct claim types. Store operating expenses with subject, period and source. A buyer assumption remains private to its scenario.
 - For a common period and currency, compute effective rental income from included units under a stated rent basis and explicit vacancy assumption. Apply vacancy once. Subtract operating expenses to obtain net operating income, then debt service and separately identified reserves for modeled cash flow. A live-in scenario excludes rent for the selected owner unit but keeps whole-property costs. Return null and missing-field reasons for incomplete required inputs. Allow an explicit zero.
-- Return ordered p10/p50/p90 price quantiles with currency, as-of time, comparable IDs, support and model version; return `insufficient_data` when support policy fails.
-- Backtest on time-separated held-out sales; report median absolute percentage error, bias and empirical p10-p90 coverage, including sparse segments. Store release thresholds in `evaluation-policy.md` before promotion; do not pick them after seeing candidate performance.
-- Recalculate offer scenarios from frozen tenant inputs, valuation revision, financing assumptions and repair reserves. Output the budget ceiling and each binding constraint; do not exceed a confirmed hard financial limit.
+- Offer scenarios: `walk_away = min(confirmed hard financial limit, underwriting price ceiling for income strategies, p50 * (1 + premium_tolerance))`; `value_bid = min(p50, walk_away)`; `competitive_bid = min(q(0.65 + 0.10 * high_competition), walk_away)`; `win_focused_bid = min(p90, walk_away)`, where `premium_tolerance` and `high_competition` come from the subscription version and active-competition claims. Bids satisfy `value_bid <= competitive_bid <= win_focused_bid <= walk_away` and never exceed a confirmed hard limit. Output each binding constraint.
+- Recalculate offer scenarios from frozen tenant inputs, valuation revision, financing assumptions and repair reserves; identical inputs give identical outputs.
+- `POST /offer-scenarios/{id}/outcomes` records offered amount, result and final sale price when known; outcomes stay tenant-private and appear in the evaluation dataset only with tenant consent.
 - Omit seller acceptance probabilities unless a separately evaluated probability model supports them.
 
-SHOULD: Prefer one source, one concrete analyzer and one deployment path per new phase.
+SHOULD: Prefer one source, one concrete analyzer set and one deployment path per new phase.
 - A phase task spec names the first implementation and a measurable need before adding another abstraction; unused placeholder services do not enter the release.
-
-SHOULD: Refresh by subject freshness and material input changes.
-- Unchanged evidence and matching versions produce a cache hit; source price/status changes invalidate dependent views; preference-only edits avoid a browser fetch.
 
 SHOULD: Minimize raw personal data and make retention enforceable.
 - Source account deletion revokes credentials, cancels queued source work and applies the approved evidence policy. Audit records retain only the metadata the policy permits.
 
-MAY: Add a licensed MLS API connector in place of browser capture.
-- It implements the same snapshot/evidence contract and passes replay/identity tests; switching sources preserves property IDs and source attribution.
+MAY: Add a licensed MLS API or RESO connector, or a Zillow/Redfin/Realtor source, as another `PropertySource`.
+- It implements the same source observation/evidence contract and passes replay/identity tests; switching sources preserves property IDs and source attribution.
+
+MAY: Add voice as an interview interaction adapter.
+- It calls the same interview use cases and produces the same session state as text answers.
 
 MAY: Add PostGIS, search indexing or vector retrieval after measured need.
 - A benchmark or concrete query requirement justifies each dependency, and tests prove tenant/scope filtering before retrieval results reach analyzers.
 
 ### Initial interfaces and API shapes
 
-Use Python 3.13+ (D20) and a current supported Node LTS selected and pinned at bootstrap. These are compatibility floors, not claims about the newest release. Resolve supported library versions then commit locks; avoid unbounded version ranges in deployment images.
+Use Python 3.13+ with FastAPI, Pydantic, SQLAlchemy, Alembic, PostgreSQL, Playwright, boto3 and pytest (D20), and a current supported Node LTS selected and pinned at bootstrap. These are compatibility floors, not claims about the newest release. Resolve supported library versions then commit locks; avoid unbounded version ranges in deployment images.
 
 ```python
 from dataclasses import dataclass
@@ -841,9 +1209,20 @@ from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
-Eligibility = Literal['pass', 'fail', 'unknown']
-ComponentState = Literal['pending', 'running', 'complete', 'deferred',
-                         'failed', 'waiting_for_user', 'stale']
+ValueStatus = Literal['OBSERVED', 'INFERRED', 'UNKNOWN', 'CONFLICTING']
+Requirements = Literal['pass', 'fail', 'unknown']
+Tier = Literal['BASELINE', 'DEEP', 'EXPERIMENT']
+TriggerType = Literal['AUTO', 'MANUAL', 'EXPERIMENT']
+FailureClass = Literal['TRANSIENT', 'AUTH_REQUIRED', 'DATA_UNAVAILABLE',
+                       'INVALID_INPUT', 'PERMANENT', 'BUG_UNKNOWN']
+Capability = Literal['LISTING', 'PHOTOS', 'REMARKS', 'LISTING_HISTORY',
+                     'SALE_HISTORY', 'TAX_HISTORY', 'ASSESSOR', 'AVM',
+                     'OWNERSHIP', 'PERMITS', 'ZONING', 'PLANNING',
+                     'STREET_IMAGERY', 'LOCATION_CONTEXT', 'TRAFFIC',
+                     'TRAVEL_TIME']
+ModelCapability = Literal['TEXT', 'VISION', 'STRUCTURED_OUTPUT']
+ComponentState = Literal['PENDING', 'RUNNING', 'COMPLETE', 'DEFERRED',
+                         'FAILED', 'WAITING_FOR_USER']
 
 @dataclass(frozen=True)
 class ExecutionContext:
@@ -856,19 +1235,20 @@ class ExecutionContext:
 @dataclass(frozen=True)
 class TaskInput:
     schema_version: int
-    job_id: UUID
+    workflow_run_id: UUID
+    task_kind: str
     subject_type: Literal['property', 'unit', 'location', 'market']
     subject_id: UUID
     input_digest: str
     task_version: str
     idempotency_key: str
     deadline: datetime
-    # Tenant/scope MUST be loaded from the trusted job record, not queue fields.
+    # Tenant/scope MUST be loaded from the trusted workflow run, not queue fields.
 
 @dataclass(frozen=True)
 class CriterionResult:
-    field: str
-    outcome: Eligibility
+    attribute: str
+    outcome: Requirements
     contribution: Decimal | None
     reason_code: str
     claim_ids: tuple[UUID, ...]
@@ -879,33 +1259,89 @@ class EvidenceStore(Protocol):
     async def read_authorized(self, ctx: ExecutionContext,
                               evidence_id: UUID) -> bytes: ...
 
-class AnalysisProvider(Protocol):
+class PropertySource(Protocol):
+    source_kind: str
+    async def observe(self, request: 'SourceRequest') -> 'list[SourceObservationDraft]': ...
+
+class EmailIngress(Protocol):
+    async def fetch_new(self, checkpoint: 'MailboxCheckpoint') -> 'list[RawMessage]': ...
+
+class Enricher(Protocol):
+    name: str
+    capabilities: frozenset[Capability]
+    async def enrich(self, capability: Capability, subject_id: UUID) -> 'EnrichmentResult': ...
+
+class Analyzer(Protocol):
+    name: str
+    version: str
+    tier: Tier
+    model_capabilities: frozenset[ModelCapability]
+    output_attributes: frozenset[str]
+    async def analyze(self, evidence: 'EvidenceSet', ontology_version: str) -> 'AnalyzerOutput': ...
+
+class ModelProvider(Protocol):
+    capabilities: frozenset[ModelCapability]
     async def infer(self, request: 'InferenceRequest') -> 'InferenceResult': ...
+
+class ModelRouter(Protocol):
+    def select(self, capability: ModelCapability, policy: 'ModelPolicy') -> ModelProvider: ...
+
+class TaskLauncher(Protocol):
+    async def launch(self, task: TaskInput) -> str: ...  # returns execution reference
+
+class NotificationStrategy(Protocol):
+    channel: Literal['EMAIL', 'IN_APP']
+    async def deliver(self, notification: 'Notification') -> 'DeliveryResult': ...
+
+class SecretProvider(Protocol):
+    async def get(self, logical_name: str) -> str: ...
 ```
 
-`InferenceRequest` is a Pydantic model with `request_id`, `capability` (`text`, `vision`, `structured_output`), `model_policy`, `prompt_version`, `output_schema`, `evidence_refs`, `max_output_tokens`, `timeout_seconds`, `budget_reservation_id`, and `data_handling_policy`. `InferenceResult` contains validated JSON output, provider/model IDs, token/image usage where supplied, latency, finish reason, raw-response evidence reference where retention permits, and billable-operation reference. Return `unsupported_capability` before a paid call if an adapter cannot meet the contract.
+`InferenceRequest` is a Pydantic model with `request_id`, `capability`, `model_policy`, `prompt_version`, `output_schema`, `evidence_refs`, `max_output_tokens`, `timeout_seconds`, `budget_reservation_id`, and `data_handling_policy`. `InferenceResult` contains validated JSON output, provider/model IDs and model version, token/image usage where supplied, latency, finish reason, raw-response evidence reference where retention permits, and billable-operation reference. Return `unsupported_capability` before a paid call if no provider can meet the contract.
 
-Initial ontology keys: `listing.asking_price`, `listing.status`, `property.bedrooms`, `property.bathrooms`, `property.interior_area`, `property.lot_area`, `property.parking`, `property.condition`, `property.outdoor_space`, `location.street_activity`, `location.noise`, `location.hazards`, and `location.zoning`. Use field-specific units and enums. Do not seed a buyer's desired values as observed property facts.
+Ontology v1 seed (`ontology/v1.0.0/attributes.json`) MUST contain at least 75 attributes. Representative keys per category; task specs enumerate the full list:
 
-Phase 8 adds an additive ontology minor version with unit, lease and expense keys: `property.unit_count`, `unit.label`, `unit.bedrooms`, `unit.bathrooms`, `unit.occupancy_status` (`occupied`, `vacant`, `owner_occupied`), `unit.lease_start`, `unit.lease_end`, `unit.available_at_closing` (boolean; no supporting claim resolves to `unknown`), `unit.contractual_rent`, `unit.collected_rent`, `unit.projected_rent` (each with amount, currency and rent period), `property.operating_expense` (category, amount, currency, period), `property.property_tax` and `property.insurance`. `underwriting.net_operating_income` and `underwriting.cash_flow` are criterion fields computed per search by `domain/underwriting.py` and stored with `match_results`; they are not claims.
+| Category | Representative keys |
+|---|---|
+| `listing` | `listing.asking_price`, `listing.status`, `listing.days_on_market` |
+| `structure` | `structure.interior_area`, `structure.lot_area`, `structure.year_built`, `structure.stories`, `structure.unit_count` |
+| `rooms` | `rooms.bedrooms`, `rooms.bathrooms`, `rooms.primary_suite_level`, `rooms.office_count` |
+| `layout` | `layout.open_plan`, `layout.single_level_living`, `layout.bedroom_separation` |
+| `indoor_outdoor` | `indoor_outdoor.flow`, `indoor_outdoor.covered_outdoor_area` |
+| `yard` | `yard.usable_area`, `yard.privacy`, `yard.fenced` |
+| `garage` | `garage.spaces`, `garage.type`, `garage.ev_ready` |
+| `condition` | `condition.overall`, `condition.renovation_era`, `condition.roof_age` |
+| `kitchen` | `kitchen.quality`, `kitchen.island`, `kitchen.updated` |
+| `architecture` | `architecture.style`, `architecture.natural_light` |
+| `location` | `location.walkability`, `location.park_distance`, `location.freeway_distance`, `location.traffic_level`, `location.cul_de_sac`, plus the D42 traffic keys listed in Requirements |
+| `risks` | `risks.flood_zone`, `risks.fire_zone`, `risks.noise_exposure` |
+| `development_potential` | `development_potential.adu_potential`, `development_potential.lot_split`, `development_potential.zoning` |
+
+Use attribute-specific units and enums. Do not seed a buyer's desired values as observed property facts.
+
+Phase 8 publishes ontology v1.1.0, an additive minor version with unit, lease and expense keys: `unit.label`, `unit.bedrooms`, `unit.bathrooms`, `unit.occupancy_status` (`occupied`, `vacant`, `owner_occupied`), `unit.lease_start`, `unit.lease_end`, `unit.available_at_closing` (boolean; no supporting claim resolves to `UNKNOWN`), `unit.contractual_rent`, `unit.collected_rent`, `unit.projected_rent` (each with amount, currency and rent period), `expense.operating_expense` (category, amount, currency, period), `expense.property_tax` and `expense.insurance`. `underwriting.net_operating_income` and `underwriting.cash_flow` are criterion attributes computed per subscription by `domain/underwriting.py` and stored with `property_evaluations`; they are not claims.
 
 ```typescript
-type AcquisitionStrategy = 'owner_occupy' | 'live_in_and_rent' | 'rental_hold';
+type AcquisitionStrategy = 'owner_occupancy' | 'live_in_and_rent' | 'rental_hold';
 type Experience = 'homebuyer' | 'investor';
-type ValueStatus = 'verified' | 'inferred' | 'disputed' | 'unknown' | 'stale';
-type JobState = 'queued' | 'running' | 'complete' | 'partial' |
-  'waiting_for_user' | 'failed' | 'cancelled';
+type ValueStatus = 'OBSERVED' | 'INFERRED' | 'UNKNOWN' | 'CONFLICTING';
+type Requirements = 'pass' | 'fail' | 'unknown';
+type WorkflowRunState = 'QUEUED' | 'RUNNING' | 'COMPLETE' | 'PARTIAL' |
+  'WAITING_FOR_USER' | 'FAILED' | 'CANCELLED';
+type FailureClass = 'TRANSIENT' | 'AUTH_REQUIRED' | 'DATA_UNAVAILABLE' |
+  'INVALID_INPUT' | 'PERMANENT' | 'BUG_UNKNOWN';
 
 interface ResolvedValue {
-  field: string;
-  value: unknown; // OpenAPI emits field-specific unions where stable.
+  attribute: string;
+  value: unknown; // OpenAPI emits attribute-specific unions where stable.
   unit: string | null;
   status: ValueStatus;
+  confidence: { method: string; value: number | null };
   claim_ids: string[];
   evidence_ids: string[];
+  analyzer_version: string | null;
   observed_at: string | null;
-  expires_at: string | null;
-  confidence: { method: string; value: number | null };
+  invalidated_at: string | null; // stale when non-null; not a status
 }
 interface PropertyIntelligenceProfile {
   property_id: string;
@@ -914,33 +1350,81 @@ interface PropertyIntelligenceProfile {
   resolver_version: string;
   input_digest: string;
   generated_at: string;
+  completeness: number; // share of ACTIVE attributes not UNKNOWN
   values: ResolvedValue[];
+  tiers: Array<{
+    tier: 'BASELINE' | 'DEEP';
+    state: 'NOT_TRIGGERED' | 'PENDING' | 'PARTIAL' | 'COMPLETE';
+    triggers: Array<{ type: 'AUTO' | 'MANUAL' | 'EXPERIMENT';
+      strategy: string; reasons: string[]; created_at: string }>;
+  }>;
   components: Array<{
     name: string; state: string; last_success_at: string | null;
-    failure_code: string | null;
+    failure_class: FailureClass | null; failure_code: string | null;
   }>;
 }
-interface MatchResult {
-  search_id: string;
+interface DimensionScore {
+  score: number | null; // 0..100
+  coverage: number;     // 0..1
+  contributions: Array<{
+    attribute: string; contribution: number | null; claim_ids: string[];
+  }>;
+}
+interface PropertyEvaluation {
+  id: string;
+  search_subscription_id: string;
   strategy: AcquisitionStrategy;
   property_id: string;
   profile_revision: string;
-  preference_revision: string;
+  preference_version: string;
+  subscription_version: string;
+  ontology_version: string;
   scoring_version: string;
-  underwriting_version: string | null; // null for owner_occupy
-  eligibility: 'pass' | 'fail' | 'unknown';
-  score: number | null;
-  coverage: number;
-  criteria: Array<{
-    field: string; outcome: 'pass' | 'fail' | 'unknown';
-    contribution: number | null; reason_code: string; claim_ids: string[];
+  underwriting_version: string | null; // null for owner_occupancy
+  valuation_id: string | null;
+  input_digest: string;
+  overall: { score: number | null; coverage: number };
+  requirements: {
+    status: Requirements;
+    criteria: Array<{
+      attribute: string; outcome: Requirements;
+      reason_code: string; claim_ids: string[];
+    }>;
+  };
+  lifestyle_fit: DimensionScore | null; // null for rental_hold
+  property_quality: DimensionScore;
+  value: (DimensionScore & {
+    p_value_at_least_list: number; confidence_factor: number;
+  }) | null; // null before scoring_v2 or without a valuation
+  critical_mismatches: Array<{
+    preference: string; attribute: string; reason_code: string; claim_ids: string[];
   }>;
+  explanation: { text: string; analysis_run_id: string } | null; // never feeds scores
+}
+interface Valuation {
+  id: string; property_id: string; as_of: string; currency: string;
+  central_estimate: number; p10: number; p90: number;
+  confidence: { label: 'HIGH' | 'MEDIUM' | 'LOW'; width_ratio: number };
+  list_price_comparison: { difference: number; list_percentile: number } | null;
+  comps: Array<{ sale_id: string; weight: number; reason: string;
+    similarity: Record<string, number> }>;
+  status: 'COMPLETE' | 'insufficient_data';
+  model_version: string;
+}
+interface OfferScenarioResult {
+  value_bid: number | null;
+  competitive_bid: number | null;
+  win_focused_bid: number | null;
+  walk_away: number | null;
+  binding_constraints: string[];
+  missing_inputs: string[];
 }
 interface Problem {
   type: string;
   title: string;
   status: number;
   code: string;
+  failure_class: FailureClass | null;
   detail: string; // Redacted, user-safe message.
   correlation_id: string;
   retryable: boolean;
@@ -948,123 +1432,141 @@ interface Problem {
 }
 ```
 
-Tenant comes from authenticated membership selection, not an arbitrary body field. Use `/v1/tenants/{tenant_id}` as an explicit selector and validate membership; never trust the path alone. The paths below are relative to that prefix, except `/health/live`, `/health/ready` and the administrative OpenAPI export.
+Tenant comes from authenticated membership selection, not an arbitrary body field. Use `/v1/tenants/{tenant_id}` as an explicit selector and validate membership; never trust the path alone. The paths below are relative to that prefix, except `/health/live`, `/health/ready` and the administrative OpenAPI export. Resources use plain REST verbs; action endpoints exist only for workflows (D30).
 
 | Method and path | Request | Success response and behavior |
 |---|---|---|
-| `POST /searches` | `{name,experience,strategy}` | `201 {search_id,preference_revision}`; initialize search-scoped preferences |
-| `PUT /searches/{search_id}/shortlist/{property_id}` | Empty body | `201` on first save, `200` with the same entry on repeat; DELETE on the same path returns `204`, idempotent; phase 5 |
-| `GET /searches/{search_id}/shortlist` | Cursor | Shortlist entries for this search only |
-| `GET /searches` | None | Authorized searches and their current revisions |
-| `GET /properties` | `search_id` for ranked feed, `cursor`, `limit` 1..100, `eligibility`, `status`, `as_of` | `{items: PropertySummary[], next_cursor: string|null}`; with `search_id`, order by eligibility group (`pass`, `unknown`, `fail`), then score descending, then `id`, with the opaque cursor bound to scope and match revision; without `search_id`, stable `(updated_at,id)` ordering and a scope-bound cursor |
-| `GET /properties/{id}` | Optional `profile_revision` and `search_id` | Sale property and component units, listing history, profile, match for selected search when supplied, component status |
-| `GET /properties/{id}/evidence` | Pagination | Authorized metadata, no raw storage credentials |
+| `GET /properties` | `search_subscription_id` for ranked feed, `cursor`, `limit` 1..100, `requirements`, `status`, `as_of` | `{items: PropertySummary[], next_cursor: string|null}`; with a subscription, order by requirements group (`pass`, `unknown`, `fail`), then overall descending, then `id`; `fail` excluded unless requested; the opaque cursor binds to scope and evaluation revision; without a subscription, stable `(updated_at,id)` ordering and a scope-bound cursor |
+| `POST /properties` | `{url}` or `{address}`; `Idempotency-Key` | `202 {property_id,workflow_run_id,status_url}`; manual add (D17); `422 unsupported_source` for a non-allowlisted URL; phase 1 |
+| `GET /properties/{id}` | Optional `profile_revision` and `search_subscription_id` | Summary, component units, current listing, evaluation for the subscription when supplied, component status |
+| `GET /properties/{id}/listings` | Cursor | Listing episodes with current state and source attribution |
+| `GET /properties/{id}/intelligence` | Optional `profile_revision` | `PropertyIntelligenceProfile`, deep research tier state and findings, valuation and comps from phase 7, location profile from phase 6 |
+| `GET /properties/{id}/history` | Cursor, `kinds` | Timeline: listing history, source observations, analysis runs, triggers, evaluation changes |
+| `GET /properties/{id}/evaluation` | `search_subscription_id` | `200 PropertyEvaluation` for current versions, cached or deterministically computed |
+| `GET /properties/{id}/evidence` | Pagination | Authorized evidence asset metadata, no raw storage credentials |
 | `POST /evidence/{id}/download` | Empty body | Short-lived signed URL and expiry; default 5 minutes |
-| `POST /properties/{id}/documents` | `multipart/form-data`: one `file` (`application/pdf`, `text/csv`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `image/jpeg`, `image/png`; max 20 MiB), `document_type` (`rent_roll`, `lease`, `expense_statement`), optional `unit_id`; `Idempotency-Key` | `202 {evidence_id,job_id,status_url}`; stores tenant-private evidence before extraction; the completed job's result references list the created claim IDs; a repeated digest returns the existing evidence; `413` oversize, `415` unsupported type; phase 8 |
-| `POST /analyses` | `{property_id, components, force:false}` plus `Idempotency-Key` | `202 {job_id,state,status_url}`; force restricted and budget checked |
-| `GET /jobs/{id}` | None | Job state, component states, safe failures, result references |
-| `POST /jobs/{id}/cancel` | `{reason}` | `202` cancellation request; cooperative semantics |
-| `GET /searches/{search_id}/preferences/current` | None | Current immutable revision and ETag |
-| `POST /searches/{search_id}/preferences/revisions` | Strategy, criteria, weights, unknown policy, budget, financing assumptions; `If-Match` | `201` revision, schedules recompute; `412` stale base |
-| `POST /matches/evaluate` | `{search_id,property_id,profile_revision,preference_revision}` | `200 MatchResult`, cached or deterministic calculation |
-| `POST /claims/{id}/verifications` | `{outcome,corrected_value?,reason}` | `201` verification event and correction reference; reviewer authorization |
-| `GET /verifications` | State, cursor | Review queue restricted to allowed scope |
-| `POST /properties/{id}/feedback` | `{search_id,target_revision,kind,text?}`; `kind` is `note` or `visit_question`; `text` required for `visit_question` | `201` private feedback (D30) |
-| `GET /searches/{search_id}/feedback` | `kind`, `property_id`, cursor | Private notes and visit questions for this search |
+| `POST /properties/{id}/documents` | `multipart/form-data`: one `file` (`application/pdf`, `text/csv`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `image/jpeg`, `image/png`; max 20 MiB), `document_type` (`rent_roll`, `lease`, `expense_statement`), optional `unit_id`; `Idempotency-Key` | `202 {evidence_id,workflow_run_id,status_url}`; stores tenant-private evidence before extraction; the completed run's result references list the created claim IDs; a repeated digest returns the existing evidence; `413` oversize, `415` unsupported type; phase 8 |
+| `POST /properties/{id}/deep-analysis` | `{reason?}`; `Idempotency-Key` | `202 {trigger_id,workflow_run_id,status_url}`; `MANUAL` trigger, `DEEP` tier budget checked; phase 3 |
+| `POST /properties/{id}/reanalyze` | `{components?, tier, force:false}`; `Idempotency-Key` | `202 {workflow_run_id,status_url}`; resolves `MANUAL` invalidations; `force` restricted to operators and budget checked |
+| `POST /properties/{id}/feedback` | `{search_subscription_id,target_revision,kind,text?}`; `kind` is `note`, `visit_question`, `like` or `dislike`; `text` required for `visit_question` | `201` private feedback; `like`/`dislike` may create preference proposals |
+| `POST /properties/{id}/tours` | `{search_subscription_id,visited_at}` | `201` tour plus up to three post-tour verification requests; phase 5 |
+| `GET /workflow-runs/{id}` | None | Run state, step states, failure classes, safe failures, result references |
+| `POST /workflow-runs/{id}/cancel` | `{reason}` | `202` cancellation request; cooperative semantics |
+| `GET /preferences` | None | The tenant's active PreferenceProfile with current version and ETag |
+| `PATCH /preferences/{id}` | Partial profile body, optional `confirm_material`; `If-Match` | `200` new immutable version, schedules re-evaluation; `409 material_change_requires_confirmation`; `412` stale base |
+| `GET /preferences/{id}/versions` | Cursor | Version history with origin, evidence and diff |
+| `POST /preferences/{id}/revert` | `{version}`; `If-Match` | `200` new version equal in content to the target |
+| `GET /preferences/{id}/proposals` | State filter | Learned and interview proposals with materiality and evidence |
+| `POST /preferences/{id}/proposals/{proposal_id}/approve` and `/reject` | `{reason?}` | `200` applied version or rejected proposal |
+| `POST /preferences/{id}/interview-sessions` | None | `201` session with state and first questions; phase 4 |
+| `POST /interview-sessions/{id}/answers` | `{answers}` (structured values or text, optional example property IDs) | `200` updated state, next questions, proposals |
+| `GET /search-subscriptions` | None | Authorized subscriptions with current versions |
+| `POST /search-subscriptions` | `{name,experience,strategy,source,criteria,notification_policy,budget,financing?}` | `201 {search_subscription_id,version}`; phase 4 |
+| `PATCH /search-subscriptions/{id}` | Partial body, optional `confirm_material`; `If-Match` | `200` new immutable version; budget/geography edits are material |
+| `PUT /search-subscriptions/{id}/shortlist/{property_id}` | Empty body | `201` on first save, `200` with the same entry on repeat; DELETE on the same path returns `204`, idempotent; phase 5 |
+| `GET /search-subscriptions/{id}/shortlist` | Cursor | Shortlist entries for this subscription only |
+| `GET /search-subscriptions/{id}/feedback` | `kind`, `property_id`, cursor | Private notes and visit questions for this subscription |
+| `POST /claims/{id}/verifications` | `{outcome,corrected_value?,evidence_ids?,reason}` | `201` `HUMAN` claim and verification record (D36) |
+| `GET /verifications` | State, cursor | VOI-ordered review queue restricted to allowed scope (D37) |
 | `GET /notifications` | Cursor, unread filter | In-app inbox |
 | `PATCH /notifications/{id}` | `{read:true}` | Updated record |
-| `PUT /notification-settings` | Channel settings, digest window, timezone | Validated settings |
-| `GET /valuations/{id}` | None | Versioned quantiles, comps, assumptions, support |
-| `POST /valuations` | `{property_id,as_of}` and idempotency key | `202` job; phase 7 |
-| `POST /offer-scenarios` | Search ID, preference and valuation revisions, owner unit ID for live-in, rent basis, `expense_claim_ids`, optional `expense_overrides` (category, amount, currency, period), financing and reserves | `201` immutable scenario; each expense line is labelled `claim` or `buyer_assumption`; overrides stay private to the scenario; phase 8 |
+| `PUT /notification-settings` | Channel opt-ins and addresses, timezone | Validated settings; per-subscription policy lives on the subscription |
+| `POST /offer-scenarios` | Subscription ID, preference, subscription and valuation revisions, owner unit ID for live-in, rent basis, `expense_claim_ids`, optional `expense_overrides` (category, amount, currency, period), financing, reserves, premium tolerance | `201` immutable scenario with `OfferScenarioResult`; each expense line is labelled `claim` or `buyer_assumption`; overrides stay private to the scenario; phase 8 |
 | `GET /offer-scenarios/{id}` | None | Immutable scenario inputs and output; phase 8 |
-| `GET /ops/jobs` | Failure code, age, source, cursor | Scoped operator list |
-| `POST /ops/jobs/{id}/retries` | Components, reason and idempotency key | `202` child job with prior-attempt links |
+| `POST /offer-scenarios/{id}/outcomes` | `{offered_amount,result,final_sale_price?}` | `201` private outcome record; phase 8 |
+| `GET /ops/workflow-runs` | Failure class, code, age, source, cursor | Scoped operator list of failed and paused work |
+| `POST /ops/workflow-runs/{id}/retries` | Steps, reason and idempotency key | `202` child run with prior-attempt links |
 | `POST /ops/identities/merges` | Candidate IDs and reason | `201` audited merge; reviewer/operator gate |
-| `GET /ops/costs` | Time range and grouping | Usage, reservations, unknown-cost flags and budgets; phase 5 |
+| `GET /ops/costs` | Time range and grouping (tier, category, analyzer, provider, property) | Usage, reservations, unknown-cost flags and tier budgets; phase 5 |
+| `PATCH /ops/budgets/{tier}` | Limit, period, reason | `200` audited tier budget change; phase 5 |
 | `POST /ops/source-accounts/{id}/resume` | Refreshed secret version reference, reason | `202` retry episode; never accept a raw session in a loggable URL |
 
-REST errors use `application/problem+json`. Use 400 for malformed input, 401 for missing/invalid authentication, 403 for disallowed capabilities, 404 for absent or inaccessible object IDs, 413 for oversized uploads, 415 for unsupported upload media types, 409 for idempotency conflicts or invalid state transitions, 412 for stale preference revisions, 422 for schema/domain validation, 429 for rate/budget admission limits and 503 for unavailable dependencies. Use `202` with deferred component status when a queued analysis can still provide useful work. Never return 200 with a hidden terminal failure.
+Valuations are read through `GET /properties/{id}/intelligence`; the baseline workflow computes them from phase 7, so no separate valuation endpoint exists.
 
-For product-specific requests, MCP accepts the same search ID and revision inputs as REST. Offer scenario results, through REST and the phase 8 MCP tools, include strategy, currency, period, included units, rent basis, effective rent, operating expenses, net operating income, debt service, reserves, cash flow and missing inputs. Return computed subtotals for which all inputs are available.
+REST errors use `application/problem+json`. Use 400 for malformed input, 401 for missing/invalid authentication, 403 for disallowed capabilities, 404 for absent or inaccessible object IDs, 413 for oversized uploads, 415 for unsupported upload media types, 409 for idempotency conflicts, invalid state transitions or unconfirmed material changes, 412 for stale preference or subscription versions, 422 for schema/domain validation, 429 for rate/budget admission limits and 503 for unavailable dependencies. Use `202` with deferred component status when a queued analysis can still provide useful work. Never return 200 with a hidden terminal failure.
 
-MCP tool names: `search_properties`, `get_property`, `get_evidence_metadata`, `evaluate_match`, `request_analysis`, `get_job`, `get_preferences`, `create_preference_revision`, `record_feedback`; phase 5 adds `create_search`, and phase 8 adds `create_offer_scenario` and `get_offer_scenario`. Use the same request/result schemas and principal context. Mark mutating tools as writes, require idempotency keys for job creation, and apply membership and budget checks. Do not expose source credentials, arbitrary SQL, arbitrary URL fetching, or operator tools in the initial MCP surface. Evidence content access uses authorized application reads, not public object URLs.
+For product-specific requests, MCP accepts the same subscription ID and version inputs as REST. Offer scenario results, through REST and the phase 8 MCP tools, include strategy, currency, period, included units, rent basis, effective rent, operating expenses, net operating income, debt service, reserves, cash flow, the four bid outputs and missing inputs. Return computed subtotals for which all inputs are available.
 
-MCP transport and auth: serve the streamable HTTP transport at `/mcp` in stateless mode with JSON responses, so each request fits one Lambda invocation. `make dev` serves it on loopback 8001; dogfood runs it as the `mcp` service in `infra/dogfood/compose.yaml`, routed by `infra/dogfood/Caddyfile`; AWS runs it as a Lambda behind the API Gateway in `infra/cdk/lib/api-stack.ts`. Publish OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` naming the Cognito issuer, per the MCP authorization specification [R8]. Cognito offers no dynamic client registration, so `identity-stack.ts` defines a public MCP app client using authorization code with PKCE, and MCP clients are configured with its client ID. MCP clients present the access token as `Authorization: Bearer`; the same `adapters/auth/cognito.py` checks as REST validate it and resolve the Cognito subject to the internal `users` row and tenant membership (D28). The MCP Lambda imports the application layer directly (D29); Fargate is not used for MCP (D26, D27).
+MCP tool names mirror the REST resources: `list_properties`, `get_property`, `get_property_listings`, `get_property_intelligence`, `get_property_history`, `get_property_evaluation`, `get_evidence_metadata`, `add_property`, `request_deep_analysis`, `request_reanalysis`, `get_workflow_run`, `get_preferences`, `update_preferences`, `record_feedback`; phase 4 adds `list_search_subscriptions` and `create_search_subscription`, and phase 8 adds `create_offer_scenario` and `get_offer_scenario`. Use the same request/result schemas and principal context. Mark mutating tools as writes, require idempotency keys for workflow creation, require `confirm_material` for material preference changes, and apply membership and budget checks. Do not expose source credentials, arbitrary SQL, arbitrary URL fetching, operator tools or the interview in the initial MCP surface. Evidence content access uses authorized application reads, not public object URLs.
+
+MCP transport and auth: serve the streamable HTTP transport at `/mcp` in stateless mode with JSON responses, so each request fits one Lambda invocation. `make dev` serves it on loopback 8001; dogfood runs it as the `mcp` service in `infrastructure/dogfood/compose.yaml`, routed by `infrastructure/dogfood/Caddyfile`; AWS runs it as a Lambda behind the API Gateway in `infrastructure/cdk/lib/api-stack.ts`. Publish OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` naming the Cognito issuer, per the MCP authorization specification [R8]. Cognito offers no dynamic client registration, so `identity-stack.ts` defines a public MCP app client using authorization code with PKCE, and MCP clients are configured with its client ID. MCP clients present the access token as `Authorization: Bearer`; the same `adapters/auth/cognito.py` checks as REST validate it and resolve the Cognito subject to the internal `users` row and tenant membership (D28). The MCP Lambda imports the application layer directly (D29); Fargate is not used for MCP (D26, D27).
 
 #### Workflow contract
 
-`analyze.asl.json` MUST implement the following states. Store per-component results in Postgres so a workflow retry does not lose partial success.
+`analyze.asl.json` MUST implement the following states, between 5 and 15 in total (D21), parameterized by tier. Store per-component results in Postgres so a workflow retry does not lose partial success.
 
 ```mermaid
 flowchart TD
-    Load[Load and authorize trusted job] --> Acquire[Acquire lease and reserve budget]
-    Acquire --> Inputs[Resolve input evidence]
+    Load[Load and authorize trusted workflow run] --> Acquire[Acquire lease and reserve tier budget]
+    Acquire --> Inputs[Resolve cached input evidence]
     Inputs --> Parallel[Run selected independent components]
-    Parallel --> Property[Property analyzer]
-    Parallel --> Location[Location analyzer]
-    Parallel --> Market[Market analyzer when enabled]
-    Property --> Persist[Persist component result or classified failure]
-    Location --> Persist
-    Market --> Persist
-    Persist --> Assemble[Assemble versioned partial or complete result]
-    Assemble --> Commit[Commit result and outbox event]
+    Parallel --> Analyzers[Tier analyzers]
+    Parallel --> Enrich[Capability enrichment]
+    Parallel --> Valuation[Valuation from phase 7]
+    Analyzers --> Persist[Persist analysis runs, claims or classified failure]
+    Enrich --> Persist
+    Valuation --> Persist
+    Persist --> Assemble[Resolve profile: COMPLETE or PARTIAL]
+    Assemble --> Evaluate[Recompute dependent evaluations and triggers]
+    Evaluate --> Commit[Commit result and outbox event]
     Commit --> Release[Reconcile budget and release lease]
 ```
 
-In ASL, implement independent branches with catches inside each branch; do not fail the whole Parallel state for optional enrichment errors. Human waits persist as database state and terminate the current workflow; resume starts a new bounded execution. Use deterministic execution names derived from the admitted job revision. A scheduler repairs expired leases, stranded outbox events and unresolved budget reservations. Avoid a permanently polling state machine.
+In ASL, implement independent branches with catches inside each branch; do not fail the whole Parallel state for optional enrichment errors. Human waits persist as database state and terminate the current workflow; resume starts a new bounded execution. Use deterministic execution names derived from the admitted workflow run revision. The scheduled `repair` task repairs expired leases, stranded outbox events and unresolved budget reservations. Avoid a permanently polling state machine.
 
-Local workers invoke the same task handlers with the same input envelope. They are not required to emulate Step Functions internals. The compatibility report MUST distinguish domain replay tests from actual ASL execution tests.
+Dogfood runs `runtime/local_workflow.py` in one on-demand process, invoking the same task handlers with the same input envelope in the same state order. It is not required to emulate Step Functions internals. `docs/compatibility.md` MUST distinguish domain replay tests from actual ASL execution tests.
 
 ### Error handling and edge cases
 
-| Scenario / stable code | Expected behavior | Recovery |
-|---|---|---|
-| `invalid_input` | Reject before external work; identify safe invalid fields | User correction |
-| `unauthorized` / `forbidden` | No source call or information leakage | Sign in or request allowed membership |
-| `duplicate` | Return existing admitted result/job for matching digest | No retry work |
-| `idempotency_conflict` | Same key with changed input returns 409 | Caller selects a new operation key |
-| `identity_ambiguous` | Preserve provisional identity and candidates | Audited human link/merge |
-| `auth_required` | Pause source work and notify once per episode | Operator refresh and explicit resume |
-| `source_changed` | Preserve HTML/screenshot, stop unsafe parse, partial profile | Connector fix plus versioned replay |
-| `source_removed` | Record observed unavailability; preserve authorized history | Refresh/status review; avoid declaring sold without evidence |
-| `rate_limited` | Honor Retry-After and shared source concurrency | Delayed retry within deadline |
-| `dependency_transient` | Bounded exponential retry, component status visible | Retry then partial/DLQ |
-| `timeout` | Cancel child work if possible; release/reconcile resources | Targeted retry or Fargate routing after measurement |
-| `schema_invalid` | Exclude unvalidated claims; preserve safe diagnostic reference | One budgeted repair attempt then analyzer review |
-| `unsupported_capability` | Reject provider selection before charge | Compatible adapter or deferred component |
-| `budget_exceeded` | No new optional paid call | Budget approval or next period; keep usable result |
-| `insufficient_data` | Abstain from valuation or specific inference | Additional permitted evidence |
-| `evidence_integrity` | Quarantine artifact and dependent publication | Re-fetch authorized source; investigate storage |
-| `entitlement_revoked` | Deny reads and reuse; cancel work | Policy-driven retention/deletion |
-| `conflicting_claims` | Preserve alternatives and disputed status | Field-specific resolver/human verification |
-| `stale_input` | Display age; hard filters treat stale input per revision | Refresh component |
-| `notification_unknown` | Keep in-app record; flag ambiguous external send | Provider reconciliation before resend |
-| `internal_defect` | Redacted failure, correlation ID and DLQ | Engineer fix; audited replay |
-| MIME attachment bomb | Enforce byte/part/decompression limits; quarantine | Manual review; do not auto-open executable content |
-| IMAP UID reset or mailbox move | Start new UIDVALIDITY namespace; content dedupe remains | Bounded rescan |
-| Price/status arrives out of order | Retain observation and effective times; prevent older snapshot replacing newer status | Deterministic event-time resolution |
-| Provider charged before process crash | Preserve reservation and uncertain call status | Reconcile provider operation; do not promise exactly-once billing |
-| Database unavailable | Do not acknowledge queue or advance intake checkpoint | Retry after recovery |
-| Object stored but DB commit fails | Leave unreferenced content-addressed object | Delayed orphan collector after safety window |
-| In-flight cancellation | Gate publication in commit transaction | Preserve sunk usage and captured evidence |
+| Scenario / stable code | Failure class | Expected behavior | Recovery |
+|---|---|---|---|
+| `invalid_input` | `INVALID_INPUT` | Reject before external work; identify safe invalid fields | User correction |
+| `unsupported_source` | `INVALID_INPUT` | Manual add rejects a non-allowlisted URL | Use an address or supported URL |
+| `unauthorized` / `forbidden` | Request error, not persisted work | No source call or information leakage | Sign in or request allowed membership |
+| `duplicate` | Non-failure | Return existing admitted result/run for matching digest | No retry work |
+| `idempotency_conflict` | `INVALID_INPUT` | Same key with changed input returns 409 | Caller selects a new operation key |
+| `material_change_requires_confirmation` | Non-failure | 409 listing material items | Resubmit with `confirm_material: true` or approve the proposal |
+| `identity_ambiguous` | Non-failure | Preserve provisional identity and candidates | Audited human link/merge |
+| `auth_required` | `AUTH_REQUIRED` | Pause source work and notify once per episode | Operator refresh and explicit resume |
+| `source_blocked` | `AUTH_REQUIRED` | Account state `BLOCKED`; pause dependent work | Operator clears block and resumes |
+| `source_changed` | `BUG_UNKNOWN` | Preserve HTML/screenshot, stop unsafe parse, `PARTIAL` profile | Connector fix plus versioned replay |
+| `source_removed` | `DATA_UNAVAILABLE` | Record observed unavailability; preserve authorized history | Refresh/status review; avoid declaring sold without evidence |
+| `capability_unavailable` | `DATA_UNAVAILABLE` | No provider for capability; component `DEFERRED`, attributes `UNKNOWN` | Add provider; `BATCH` invalidation |
+| `rate_limited` | `TRANSIENT` | Honor Retry-After and shared source concurrency | Delayed retry within deadline |
+| `dependency_transient` | `TRANSIENT` | Bounded exponential retry, component status visible | Retry then `PARTIAL`/DLQ |
+| `timeout` | `TRANSIENT` | Cancel child work if possible; release/reconcile resources | Targeted retry or Fargate routing after measurement |
+| `schema_invalid` | `PERMANENT` (per input and version) | Exclude unvalidated claims; preserve safe diagnostic reference | One budgeted repair attempt, then analyzer review |
+| `unsupported_capability` | `PERMANENT` | Reject provider selection before charge | Compatible adapter or deferred component |
+| `budget_exceeded` | Non-failure (`DEFERRED`) | No new optional paid call | Budget approval or next period; keep usable result |
+| `insufficient_data` | `DATA_UNAVAILABLE` | Abstain from valuation or specific inference | Additional permitted evidence |
+| `evidence_integrity` | `BUG_UNKNOWN` | Quarantine artifact and dependent publication | Re-fetch authorized source; investigate storage |
+| `entitlement_revoked` | `PERMANENT` | Deny reads and reuse; cancel work | Policy-driven retention/deletion |
+| `conflicting_claims` | Non-failure | Preserve alternatives; value status `CONFLICTING` | Field-specific resolver/human verification |
+| `stale_input` | Non-failure | Display invalidation time; requirements treat stale input per unknown policy | Recompute per invalidation mode |
+| `notification_unknown` | `TRANSIENT` | Keep in-app record; flag ambiguous external send | Provider reconciliation before resend |
+| `internal_defect` | `BUG_UNKNOWN` | Redacted failure, correlation ID and DLQ | Engineer fix; audited replay |
+| MIME attachment bomb | `INVALID_INPUT` | Enforce byte/part/decompression limits; quarantine | Manual review; do not auto-open executable content |
+| IMAP UID reset or mailbox move | Non-failure | Start new UIDVALIDITY namespace; content dedupe remains | Bounded rescan |
+| Overlapping `imap-poll` invocations | Non-failure | Second invocation fails to take the advisory lock and exits | Next minute's invocation |
+| Price/status arrives out of order | Non-failure | Retain observation and effective times; prevent older observation replacing newer status | Deterministic event-time resolution |
+| Provider charged before process crash | `TRANSIENT` | Preserve reservation and uncertain call status | Reconcile provider operation; do not promise exactly-once billing |
+| Database unavailable | `TRANSIENT` | Do not acknowledge queue or advance intake checkpoint | Retry after recovery |
+| Object stored but DB commit fails | Non-failure | Leave unreferenced content-addressed object | Delayed orphan collector after safety window |
+| In-flight cancellation | Non-failure | Gate publication in commit transaction | Preserve sunk usage and captured evidence |
 
-Default source limits: 25 MiB raw email, 100 MIME parts, 20 MiB per media object, 200 MiB cumulative media per listing job, and 60-second source request timeout. Treat these as configurable initial safety limits; log limit events and tune from authorized fixtures. Never silently truncate evidence and mark it complete.
+Default source limits: 25 MiB raw email, 100 MIME parts, 20 MiB per media object, 200 MiB cumulative media per listing task, and 60-second source request timeout. Treat these as configurable initial safety limits; log limit events and tune from authorized fixtures. Never silently truncate evidence and mark it complete.
 
 ### Test strategy and exact commands
 
-The implementation MUST provide these commands in the named manifests and Makefile. They are the verification contract for future code; this planning delivery has not implemented or run them. Tests should protect domain and operational behavior, rather than mirror method bodies.
+The implementation MUST provide these commands in the named manifests and Makefile. They are the verification contract for future code; this planning delivery has not implemented or run them. Tests should protect domain and operational behavior, rather than mirror method bodies. Tests fall into the three D46 layers.
 
-| Level | Included | Scope |
+| D46 layer | Included | Suites and scope |
 |---|---|---|
-| Unit | Yes | Identity, resolution, matching, money, quantiles, retries and taxonomy |
-| Integration | Yes | Real Postgres constraints/RLS, object store, mailbox fixture server, queue redelivery and budget races |
-| Contract | Yes | OpenAPI generation, MCP parity, AI capability/output contracts, source fixture schemas |
-| Browser E2E | Yes | Product loop, auth redirects, evidence permissions, partial results and operations roles |
-| Evaluation | Yes | Frozen golden properties, replay diffs, historical valuation holdouts and shadow isolation |
-| Infrastructure | Yes | CDK assertions, IAM scope, storage encryption, timeout/catch coverage and AWS smoke |
-| Recovery | Yes | Independent restore, object integrity, secret access and outbox restart |
-| Live source checks | Opt-in | Authorized credentialed smoke only; never required for ordinary pull requests |
+| Deterministic | Yes, every PR (path-filtered) | `backend/tests/unit`, `backend/tests/contract`, `backend/tests/integration` against local Postgres, MiniStack, object store and mailbox fixture server; frontend unit tests; CDK assertions; no external network or real model calls |
+| Replay | Yes, every PR touching backend, ontology or fixtures | `backend/tests/replay` over retained MLS email, page, provider and evidence fixtures in `/fixtures`, plus the reviewed golden set; offline evaluation with `--fail-on-regression` |
+| Live integration | Opt-in, nightly and pre-release | `backend/tests/live` against authorized providers and mailbox; `backend/tests/aws` against staging; `storage-check` against the dogfood bucket; never required for ordinary pull requests |
+
+Additional coverage inside those layers: browser E2E (product loop, auth redirects, evidence permissions, partial results, operations roles, accessibility), shadow isolation, recovery (independent restore, object integrity, secret access, outbox restart) and infrastructure (IAM scope, storage encryption, state count, timeout/catch coverage).
 
 Bootstrap from repository root:
 
@@ -1074,29 +1576,33 @@ pnpm install --frozen-lockfile
 uv sync --all-packages --frozen
 cp .env.example .env
 # Fill only required local values; synthetic mode needs no private source credentials.
-docker compose up -d postgres ministack mailpit
+docker compose up -d postgres ministack mailpit otel
 uv run --package property-focus python -m property_focus.cli migrate
+uv run --package property-focus python -m property_focus.cli ontology load ontology/v1.0.0
+uv run --package property-focus python -m property_focus.cli ontology publish 1.0.0
 uv run --package property-focus python -m property_focus.cli seed --dataset synthetic
 make dev
 ```
 
-At first bootstrap before lockfiles exist, maintainers run `pnpm install` and `uv sync --all-packages`, review resolved versions, and commit both locks. Thereafter use the frozen commands. `make dev` starts API on loopback port 8000, MCP on loopback 8001 and Vite on 5173; it refuses non-development configuration.
+At first bootstrap before lockfiles exist, maintainers run `pnpm install` and `uv sync --all-packages`, review resolved versions, and commit both locks. Thereafter use the frozen commands. `make dev` starts API on loopback port 8000, MCP on loopback 8001, Vite on 5173 and the local scheduler; it refuses non-development configuration.
 
-Pull-request verification:
+Pull-request verification (CI runs the subset selected by path filters; `make verify` runs all of it locally):
 
 ```sh
 # CI installs from locks first; lock drift fails the build.
 pnpm install --frozen-lockfile
 uv sync --all-packages --frozen
-uv run ruff check apps/backend scripts
-uv run ruff format --check apps/backend scripts
-uv run mypy apps/backend/src
-uv run python scripts/check_boundaries.py
-uv run python scripts/check_fixture_secrets.py
-uv run pytest apps/backend/tests/unit -q
-uv run pytest apps/backend/tests/integration apps/backend/tests/contract -q
-uv run python scripts/export_openapi.py
-pnpm --filter @property-focus/api-client generate
+make check-layout
+uv run ruff check backend
+uv run ruff format --check backend
+uv run mypy backend/src
+uv run python backend/scripts/check_boundaries.py
+uv run python backend/scripts/check_fixture_secrets.py
+uv run pytest backend/tests/unit -q
+uv run pytest backend/tests/integration backend/tests/contract -q
+uv run pytest backend/tests/replay -q
+uv run python backend/scripts/export_openapi.py --out frontend/src/api/openapi.json
+pnpm --filter @property-focus/web generate:api
 # The Make target fails if committed schema/client differ after regeneration.
 make check-generated
 pnpm --filter @property-focus/web lint
@@ -1111,69 +1617,155 @@ E2E, replay, evaluation and recovery:
 
 ```sh
 make test-e2e
-uv run --package property-focus python -m property_focus.cli replay --manifest evals/datasets/golden-properties.jsonl --offline
-uv run --package property-focus python -m property_focus.cli evaluate --config evals/config/baseline.yaml --offline --fail-on-regression
-uv run --package property-focus python -m property_focus.cli evaluate --config evals/config/baseline.yaml --mode shadow --no-publish
+uv run --package property-focus python -m property_focus.cli replay --manifest fixtures/golden/manifest.json --offline
+uv run --package property-focus python -m property_focus.cli evaluate --config backend/evals/config/baseline.yaml --offline --fail-on-regression
+uv run --package property-focus python -m property_focus.cli evaluate --config backend/evals/config/baseline.yaml --mode shadow --no-publish
 make restore-check
 make compatibility-local
 ```
 
-`make test-e2e` MUST start isolated synthetic services, run `pnpm --filter @property-focus/web exec playwright test`, and clean up its own resources; the run includes `e2e/accessibility.spec.ts`. `make restore-check` restores a selected test backup to an isolated database/object namespace and runs `test_recovery.py`; it MUST refuse production targets. `make compatibility-local` produces the MiniStack operation report, including unsupported operations.
+`make test-e2e` MUST start isolated synthetic services, run `pnpm --filter @property-focus/web exec playwright test`, and clean up its own resources; the run includes `e2e/accessibility.spec.ts`. `make restore-check` restores a selected test backup to an isolated database/object namespace and runs `test_recovery.py`; it MUST refuse production targets. `make compatibility-local` produces the MiniStack operation report in `docs/compatibility.md`, including unsupported operations. `make check-layout` fails on root `apps/`, `packages/`, `infra/` or `evals/` directories.
 
-Deployment validation after authorized provisioning:
+Live integration and deployment validation after authorized provisioning:
 
 ```sh
+make test-live
 pnpm --filter @property-focus/infra diff --context environment=staging
 make smoke-aws ENV=staging
 make smoke-dogfood
 make storage-check ENV=dogfood
 ```
 
-`make smoke-aws` MUST require an explicit staging account allowlist and invoke `uv run pytest apps/backend/tests/aws -q`; it must not create or delete production data. `make smoke-dogfood` uses a synthetic tenant and verifies API readiness, queued work and authorized evidence access. `make storage-check ENV=dogfood` runs `test_evidence_immutability.py` against a dedicated test prefix in the dogfood bucket and refuses MiniStack endpoints. GitHub Actions controls deployments; no command above authorizes spending or a deployment as part of writing this document.
+`make test-live` runs `uv run pytest backend/tests/live -q` only when `PF_LIVE=1` and authorized credentials resolve through the secret provider. `make smoke-aws` MUST require an explicit staging account allowlist and invoke `uv run pytest backend/tests/aws -q`; it must not create or delete production data. `make smoke-dogfood` uses a synthetic tenant and verifies API readiness, a scheduled `imap-poll` invocation, launched tasks and authorized evidence access. `make storage-check ENV=dogfood` runs `test_evidence_immutability.py` against a dedicated test prefix in the dogfood bucket and refuses MiniStack endpoints. GitHub Actions controls deployments; no command above authorizes spending or a deployment as part of writing this document.
 
 Key scenarios:
 
 | Input | Expected assertion |
 |---|---|
-| Same email delivered three times, two UIDs | Delivery history retained; one listing snapshot per content digest |
+| Same email delivered three times, two UIDs | Delivery history retained; one source observation per content digest |
+| Two `imap-poll` invocations start in the same minute | One polls; the other exits without fetching |
 | Two condos in one building, each offered for sale | Two property identities and two feed entries |
 | Whole duplex offered once, two units on its rent roll | One sale property and one feed entry with two unit records |
 | Duplex units A/B have documented monthly rent of $1,500/$1,200; zero vacancy assumption, $700 operating expenses, $800 debt service, $100 reserves | Rental hold cash flow is $1,100/month. Occupying A leaves $1,200 rent and −$400/month. Both scenarios reference the same valuation revision. |
 | Missing rent for B, only an agent projection available | Contractual-basis cash flow is unknown with B identified. A separate projection scenario labels its assumption. |
 | Relisting with new external ID | New listing, existing property, preserved history |
-| Missing hard requirement and high soft score | Unknown eligibility; no confirmed pass |
-| Contradictory bedroom claims | Deterministic resolution/disputed label and both evidence links |
-| One failed optional enrichment | Partial profile, successful facts and component retry |
+| Price change on an existing listing | One transaction writes listing state, history, domain event and outbox event |
+| Missing hard requirement and high soft score | Requirements `unknown`; no confirmed pass; listed after all `pass` homes |
+| Contradictory bedroom claims | Deterministic resolution or `CONFLICTING` status and both evidence links |
+| Human correction of kitchen quality versus analyzer claim | `HUMAN` claim wins; analyzer run and claim remain |
+| Human claim contradicts assessor parcel ID without evidence | Assessor value stays resolved |
+| New ontology version published | `BATCH` invalidations written; no analysis run until the batch sweep |
+| Ontology seed with 74 attributes, or a missing category | `ontology load` fails |
+| Property in the subscription's top quartile | `AUTO` trigger with strategy `deep_trigger_v1` and reasons |
+| Member requests deep analysis | `MANUAL` trigger, `DEEP` run, property remains usable throughout |
+| Property fails every subscription's known hard requirements | No `BASELINE` paid call; `EXPERIMENT` trigger possible from the harness |
+| One failed optional enrichment | `PARTIAL` profile, successful facts and component retry |
 | Tenant A tries tenant B's evidence ID | Indistinguishable 404; no signed URL |
-| Concurrent worker retries and expired lease | One committed result; stale completion rejected |
-| Two paid calls compete for remaining budget | At most the budget-supported reservation succeeds |
-| Shortlist the same home twice in search 1, then open search 2 | One entry in search 1 (`201` then `200`); search 2's shortlist is empty; tenant B gets `404` |
-| Flag a visit question on a home in search 1 | `feedback` row with `kind: visit_question`; listed for search 1 only; private to the tenant |
-| Live-in duplex search requires a unit available at closing; no claim supports `unit.available_at_closing` for either unit | Eligibility `unknown`; home appears in the verification feed, not among confirmed matches |
+| Concurrent task retries and expired lease | One committed result; stale completion rejected |
+| Two paid calls compete for remaining tier budget | At most the budget-supported reservation succeeds |
+| Learned weight change of 0.03 share | Auto-applied `LEARNED` version with evidence |
+| Learned change to budget or a hard requirement | Proposal `AWAITING_APPROVAL`; profile unchanged until approval |
+| Revert to an earlier preference version | New version with identical content digest |
+| Interview turn 20 | Model request carries state plus last 6 turns |
+| Explanation model output contains a different score | Stored evaluation numbers unchanged |
+| Two valuations, equal p50 above list, different widths | Narrower interval gives the higher value score |
+| Offer scenario with hard limit below p50 | All four outputs at or below the limit; limit listed as binding |
+| Shortlist the same home twice in subscription 1, then open subscription 2 | One entry in subscription 1 (`201` then `200`); subscription 2's shortlist is empty; tenant B gets `404` |
+| Flag a visit question on a home in subscription 1 | `feedback` row with `kind: visit_question`; listed for subscription 1 only; private to the tenant |
+| Record a tour | At most three post-tour verification requests, highest VOI first |
+| Live-in duplex search requires a unit available at closing; no claim supports `unit.available_at_closing` for either unit | Requirements `unknown`; home appears in the verification feed, not among confirmed matches |
+| Rental hold subscription evaluates a home far from the household's work destination | `lifestyle_fit` null; travel time does not affect overall |
 | Dogfood bucket: overwrite and delete a committed evidence object with runtime credentials, then restore from backup | Recorded version and SHA-256 unchanged; restored objects match digests (`test_evidence_immutability.py`) |
 | LLM output invents ontology key | Validation failure, no published unsupported claim |
 | Source HTML includes prompt injection | No tool execution or policy change |
-| Preference revision changes only weights | New match version; no source recapture |
+| Preference version changes only weights | New evaluation version; no source recapture or analyzer rerun |
 | Shadow candidate scores better | Report only; no publication without promotion |
 | Sparse comps or future-dated sale | Abstention or exclusion; no leaked future sale in backtest |
+| Fixture email replay | One linked trace from intake to notification |
 | Backup restore after host loss | Evidence references resolve and measured RPO/RTO report exists |
 
 ### Execution order and release gates
 
 Create downstream task specs under `/specs/property-focus/tasks/` with exact files, dependencies and phase-specific acceptance evidence. The master plan defines scope; generated task specs own task decomposition.
 
-| Gate | Dependencies | Required artifacts |
-|---|---|---|
-| Foundation ready | Auth/RLS, migrations, locked tooling, synthetic fixtures | Clean-bootstrap log, tenancy tests, compatibility inventory |
-| Intake ready | Evidence store, identity and outbox | Replay report, raw MIME integrity checks, ambiguity review fixture |
-| Intelligence ready | Browser, claims, ontology, first AI adapter, minimal budget ledger and reservations | Source session drill, profile evidence audit, golden-field report |
-| Dogfood ready | Matching, UI, shortlist and visit questions, notifications, ops, budget controls, backups | End-to-end report, accessibility report, user-confirmed preference revision, dogfood storage-check and restore report |
-| Location ready | Permitted source and field evaluation | Street inference labels, freshness tests, source-rights entry |
-| Valuation ready | Licensed comps and as-of dataset | Frozen thresholds, holdout report, abstention behavior |
-| Investor and offer ready | Valuation, rent evidence, financing, search-scoped routes | Same-account two-search E2E, duplex comparison, missing-rent checks and privacy report |
-| AWS ready | Infrastructure parity, shadows, operations drills | CDK diff review, AWS smoke, two-adapter capability contract report, failure/recovery and rollback reports |
+| Gate | Phase | Dependencies | Required artifacts |
+|---|---|---|---|
+| Foundation ready | 0 | Auth/RLS, migrations, locked tooling, D47 layout, task launcher and scheduler, synthetic fixtures | Clean-bootstrap log, tenancy tests, path-aware CI run, no-long-running-worker check, compatibility inventory |
+| Intake ready | 1 | Evidence store, identity, outbox, scheduled `imap-poll`, manual add API | Replay report, raw MIME integrity checks, poll-overlap test, ambiguity review fixture |
+| Intelligence ready | 2–3 | Browser, capability registry, ontology v1 ACTIVE, claims, first analyzer set, model router, tier budgets and reservations, invalidation | Source session drill, ontology coverage report (75+ attributes), profile evidence audit, golden-field report |
+| Evaluation ready | 4 | Preference profile and proposals, interview, subscriptions, pre-filter, evaluation, triggers | Deterministic golden evaluations, materiality table tests, trigger-rate report (20–30% AUTO) |
+| Dogfood ready | 5 | Homebuyer UI with D10 sections, shortlist and visit questions, tours, notifications, operations UI, budget controls, backups | End-to-end report, accessibility report, user-confirmed preference version, dogfood storage-check and restore report |
+| Location ready | 6 | Permitted source, traffic attributes, destinations, travel times | Street inference labels (measured versus inferred), destination privacy tests, source-rights entry |
+| Valuation ready | 7 | Licensed comps and as-of dataset, comp selector, Value dimension | Frozen thresholds, holdout report, comp explanation audit, abstention behavior |
+| Investor and offer ready | 8 | Valuation, rent evidence, financing, subscription-scoped routes, offer outcomes | Same-account two-subscription E2E, duplex comparison, missing-rent checks, bid ordering tests and privacy report |
+| AWS ready | 9 | Infrastructure parity, shadows, operations drills | CDK diff review, AWS smoke, two-adapter capability contract report, failure/recovery and rollback reports |
 
 No gate requires all future features. Dogfood uses real household decisions only after source authorization, user-reviewed preference inputs, budget configuration and evidence visibility work. Engineers can build and test synthetic functionality while these inputs remain open.
+
+### Decision traceability
+
+One row per register decision. "Req" names the BTL requirement by its leading words.
+
+| D | Decision | Implemented by | Phase |
+|---|---|---|---|
+| D1 | Personal analyst + conditional deep diligence | ATL Analysis tiers; Req "Run two analysis tiers" | 3–4 |
+| D2 | Multi-source ingestion via `PropertySource` | ATL Property pipeline; Req "Model every source as a `PropertySource`"; MAY additional sources | 1 |
+| D3 | Deterministic hard filtering before AI | ATL Property pipeline; Req "Apply a deterministic hard pre-filter" | 4 |
+| D4 | Identity is the physical property/parcel | ATL Identity; Req "Resolve property and listing identities" | 1 |
+| D5 | Tenant-scoped hybrid preferences, one shared profile | ATL Two products; data model `preference_profiles`; Req "Separate the experience…"; Risks row | 0, 4 |
+| D6 | Moderately aggressive deep research, AUTO/MANUAL/EXPERIMENT | ATL Analysis tiers; `analysis_triggers`; Req "Run two analysis tiers" | 3–4 |
+| D7 | User-independent property analysis; four value statuses | ATL Ontology and claims; Req "Resolve claims to the four value statuses" | 3 |
+| D8 | Preserve history and versioned intelligence | `listing_history`, `analysis_runs` immutability; Req "Implement specialized, versioned analyzers" | 1–3 |
+| D9 | Multidimensional fit | ATL Multidimensional evaluation; `PropertyEvaluation`; Req "Implement deterministic multidimensional evaluation" | 4, 7 |
+| D10 | Notifications plus web UI; property page sections | ATL Deployment; Req "Deliver the phase 5 user loop" | 5 |
+| D11 | Capability-based enrichment | ATL Ingestion; `application/enrichment.py`; Req "Capture TheMLS pages through a capability-based…" | 2 |
+| D12 | Immutable claims + attribute-specific resolution | ATL Ontology and claims; `claims`; `resolution_rules.py`; Req "Resolve claims…" | 3 |
+| D13 | Invalidation separate from recomputation | ATL Orchestration; `invalidations`; Req "Track invalidation separately" | 3 |
+| D14 | Specialized analyzers | ATL Analyzers; `analyzers/`; Req "Implement specialized, versioned analyzers" | 3+ |
+| D15 | Adaptive preference interview | ATL Preferences; `interview_sessions`; Req "Run the adaptive preference interview" | 4–5 |
+| D16 | Versioned, selectively automatic preference evolution | ATL Preferences; `preference_proposals`; Req "Version the PreferenceProfile…"; Risks row | 4 |
+| D17 | Property-centric app; `SearchSubscription`; manual add | ATL Two products; `search_subscriptions`; Req "Allow manual property addition" | 1, 4–5 |
+| D18 | Modular monolith | ATL The design; Req "Bootstrap…" (`check_boundaries.py`) | 0 |
+| D19 | MiniStack + DigitalOcean dogfood, AWS target | ATL Deployment; Req "Establish real AWS compatibility"; `docs/compatibility.md` | 0, 9 |
+| D20 | Python backend, React/TS frontend, TS CDK | Interfaces preamble; Scope map | 0 |
+| D21 | Step Functions; SQS/EventBridge; 5–15 states; no Temporal | ATL Orchestration; Workflow contract; Req "Establish real AWS compatibility" | 3, 9 |
+| D22 | Dedicated mailbox + IMAP polling | ATL Execution model; Req "Poll the MLS mailbox…"; Risks row | 1 |
+| D23 | Persistent TheMLS Playwright profile | ATL Ingestion state diagram; `source_accounts`; Req "Capture TheMLS pages…" | 2 |
+| D24 | Postgres relational core + JSONB | ATL Identity; Data model preamble | 0–3 |
+| D25 | Relational state + history + outbox | ATL Identity sequence; Req "Commit listing state changes…" | 1 |
+| D26 | Direct task execution, Lambda-first, Fargate | ATL Execution model; Req "Execute work as on-demand task invocations" | 0 |
+| D27 | Serverless API in AWS; FastAPI service on DO | ATL Deployment; `api-stack.ts`; `infrastructure/dogfood/compose.yaml` | 0, 9 |
+| D28 | Cognito with independent app users | ATL Deployment sign-in; Req "Authenticate and authorize…" | 0 |
+| D29 | React + Vite + RTK Query codegen + MCP adapter | ATL The design; Req "Route REST and MCP through application use cases" | 0, 5 |
+| D30 | Resource REST + workflow actions | API table; MCP tool list | 1–8 |
+| D31 | Multi-provider AI (`ModelProvider`, `ModelRouter`) | ATL Analyzers; `adapters/ai/`; Reqs "Implement specialized…", "Implement bounded…" | 3, 9 |
+| D32 | Rich ontology (75–150 attributes) | ATL Ontology; ontology key table; Req "Store the ontology in Postgres…" | 3, 8 |
+| D33 | DB-backed immutable/versioned ontology | ATL Ontology state diagram; `ontology_versions`, `ontology_attributes` | 3 |
+| D34 | Global preference definitions reference the ontology | ATL Preferences; `preference_definitions`; Req "Version the PreferenceProfile…" | 4 |
+| D35 | Claim-level evidence mandatory | `claim_evidence` locators; Req "Implement content-addressed evidence integrity…" | 2–3 |
+| D36 | Human corrections as claims | ATL Ontology and claims; `POST /claims/{id}/verifications`; Req "Resolve claims…" | 3, 5 |
+| D37 | Value-of-information verification | ATL Ontology and claims; Req "Prioritize human verification…"; tours | 3, 5 |
+| D38 | Valuation as separate subsystem; Value dimension | ATL Valuation; Req "Gate probabilistic valuation…"; `scoring_v2` | 7 |
+| D39 | Deterministic explainable comp selection | ATL Valuation; `valuations.comps`; Req "Gate probabilistic valuation…" | 7 |
+| D40 | Probabilistic valuation output | `Valuation` interface; value score formula | 7 |
+| D41 | Tenant offer strategy above valuation | ATL Valuation; `offer_scenarios`, `offer_outcomes`; bid formulas | 8 |
+| D42 | Location intelligence subsystem; busy/quiet street | ATL Reusable intelligence; Req "Deliver location intelligence…" | 6 |
+| D43 | Tenant destinations and time-of-day travel times | ATL Reusable intelligence; `travel_time_results`; Req "Deliver location intelligence…" | 6 |
+| D44 | Content-addressed evidence storage | ATL Identity; `evidence_assets`; Req "Implement content-addressed evidence integrity…" | 1–2 |
+| D45 | Evaluation and experimentation in V1 | ATL Analyzers; Req "Evaluate changes using…" | 3+ |
+| D46 | Three test layers + golden set | Test strategy layer table; `fixtures/golden/`; Req "Evaluate changes using…" | 0+ |
+| D47 | Monorepo top-level layout | Scope map; Req "Bootstrap the pinned monorepo in the D47 layout" | 0 |
+| D48 | GitHub Actions, dogfood, staging; path-aware CI | ATL Deployment; Req "Run CI path-aware…" | 0, 9 |
+| D49 | Portable secrets/configuration | ATL Deployment; `SecretProvider`; Req "Deploy through GitHub Actions with a portable secrets strategy" | 0 |
+| D50 | OpenTelemetry + structured JSON logs | ATL Deployment; Req "Install telemetry, backup and recovery controls" | 0, 5 |
+| D51 | Email + in-app via `NotificationStrategy` | ATL Deployment; Req "Provide email and in-app notifications…" | 5 |
+| D52 | Automated backups and restore drills | ATL Deployment; `backup.sh`; Req "Install telemetry, backup and recovery controls" | 5, 9 |
+| D53 | Partial results first-class | ATL Orchestration; `PARTIAL` state; Req "Run two analysis tiers" (usable before analysis) | 3+ |
+| D54 | Idempotency system-wide | ATL Analyzers (computation identity); Req "Implement durable, idempotent workflow runs…" | 0–3 |
+| D55 | Failure taxonomy + persisted failed work + ops UI | ATL Orchestration table; Error table classes; Req "Apply the D55 failure taxonomy…" | 0, 5 |
+| D56 | Cost attribution and tier budgets | ATL Deployment; `budget_reservations`; Req "Enforce cost reservations…" | 3, 5 |
+
+Cross-cutting principles map as follows: global facts and private interpretation (Req "Keep reusable intelligence separate…"); unknown is not false (Reqs on statuses and requirements logic); evidence and provenance (D35, D44 requirements); deterministic logic and AI that explains only (evaluation and pre-filter requirements); version every computation (D54 computation key); expensive understanding once (D7, analysis tiers); retries and partial failure (D53–D55); simple operations and only-needed abstractions (SHOULD "Prefer one source, one concrete analyzer set…").
 
 ### Research findings
 
@@ -1181,7 +1773,7 @@ No gate requires all future features. Dogfood uses real household decisions only
 
 - The user states this is a brand-new repository. The current workspace contained no product source files during planning; there are no established code patterns, package boundaries or migrations to preserve.
 - The proposed paths are design outputs, not findings from an existing application. No explorer agents or subagents inspected a codebase for this plan.
-- The retrieved chat confirms the sequence from foundation through ingestion, TheMLS enrichment, property intelligence, matching, usable product, location, market, offers and hardening. The full set of 56 confirmed decisions now lives in [architecture-decisions.md](architecture-decisions.md), the canonical decision list; the current user's architecture inventory supplies the broader required scope.
+- The retrieved chat confirms the sequence from foundation through ingestion, TheMLS enrichment, property intelligence, matching, usable product, location, market, offers and hardening. The full set of 56 confirmed decisions lives in [architecture-decisions.md](architecture-decisions.md), the canonical decision list; the current user's architecture inventory supplies the broader required scope.
 
 #### External research
 
@@ -1192,17 +1784,18 @@ These are primary-source findings checked on 2026-11-01. They support product/pl
 | R1 | [AWS: Choosing workflow type](https://docs.aws.amazon.com/step-functions/latest/dg/choosing-workflow-type.html) distinguishes Standard and Express execution semantics. [Step Functions best practices](https://docs.aws.amazon.com/step-functions/latest/dg/sfn-best-practices.html) covers workflow reliability and operational constraints. | Start with Standard; protect external task effects against retries and replay. Do not equate workflow semantics with exactly-once provider billing. |
 | R2 | [AWS Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html) documents the ordinary function invocation timeout limit of 900 seconds. | Bound short tasks; route browser/long work to Fargate based on measurements. |
 | R3 | [Redux Toolkit: Code generation](https://redux.js.org/toolkit/rtk-query/usage/code-generation) documents OpenAPI support through `@rtk-query/codegen-openapi`. | Export FastAPI schema and generate RTK Query endpoints; check regeneration in CI. |
-| R4 | [Playwright Python: Authentication](https://playwright.dev/python/docs/auth) warns that saved authentication state can impersonate an account. | Encrypt session state, exclude it from Git and diagnostics, scope and lease its use. |
+| R4 | [Playwright Python: Authentication](https://playwright.dev/python/docs/auth) warns that saved authentication state can impersonate an account. | Encrypt profile state, exclude it from Git and diagnostics, scope and lease its use. |
 | R5 | [PostgreSQL: Row security policies](https://www.postgresql.org/docs/17/ddl-rowsecurity.html) explains row policies and privileged-role behavior. | Combine application checks with RLS; separate runtime ownership/bypass privileges and validate backup completeness. |
 | R6 | [Amazon S3: Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html) requires versioning and applies retention to object versions. | Record exact versions; choose retention per evidence class and source obligations before enabling a lock policy. |
 | R7 | [MiniStack upstream repository](https://github.com/ministackorg/ministack) describes an AWS-emulation service surface. The documentation does not establish parity for this application's CDK resources or failure semantics. | Pin the image, test exact operations, maintain an explicit real-AWS release gate. |
 | R8 | [MCP specification: Authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) and [Transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) define OAuth 2.1 with PKCE, protected-resource metadata and the streamable HTTP transport. Added during plan review; recheck the current revision during implementation. | Serve `/mcp` over streamable HTTP and authorize with Cognito bearer tokens. |
+| R9 | [Amazon EventBridge Scheduler: schedule types](https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html) documents rate expressions in minutes, hours or days and invokes targets with 60-second precision. | Meet D22's 15–30 s cadence with multiple polls inside one per-minute invocation instead of an always-on poller; measure the real gap between polls in dogfood. |
 
-Research still required: authorized TheMLS terms and page structure, mailbox OAuth support, initial location and comp providers, DigitalOcean storage retention behavior, model data handling terms, regional AWS architecture pricing and measured pilot costs. Do not invent citations or claim those checks have passed.
+Research still required: authorized TheMLS terms and page structure, mailbox OAuth support, initial location, travel-time, public-record and comp providers, DigitalOcean storage retention behavior, the dogfood scheduler's container-launch permissions, model data handling terms, regional AWS architecture pricing and measured pilot costs. Do not invent citations or claim those checks have passed.
 
 #### User-provided artifacts and confirmed inputs
 
-Canonical decision list: [architecture-decisions.md](architecture-decisions.md) (`/specs/property-focus/architecture-decisions.md`) records the user's 56 confirmed architecture decisions. Where this plan and the register disagree, the register wins.
+Canonical decision list: [architecture-decisions.md](architecture-decisions.md) (`/specs/property-focus/architecture-decisions.md`) records the user's 56 confirmed architecture decisions and ten cross-cutting principles. Where this plan and the register disagree, the register wins. The user directed this revision: "Align the plan with the register."
 
 Subsequent product decisions: Homebuyer and residential Investor share a backend and sign-in, with separate sections of one website. Homebuyer ships first. The scope covers single-family homes and residential income acquisitions.
 
