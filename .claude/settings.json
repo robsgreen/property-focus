@@ -1,0 +1,6 @@
+{
+  "extraKnownMarketplaces": {
+    "sdlc": { "source": { "source": "github", "repo": "robsgreen/sdlc" } }
+  },
+  "enabledPlugins": { "sdlc@sdlc": true }
+}
