@@ -21,3 +21,5 @@
 {"event":"dispatch","ts":"2026-11-02 05:28","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-02 06:20","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-02 06:31","agent":"sdlc-coder"}
+{"event":"phase_start","ts":"2026-11-02 06:44","phase":"testing"}
+{"event":"dispatch","ts":"2026-11-02 06:44","agent":"sdlc-tester"}

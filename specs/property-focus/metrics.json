@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "1.0",
+  "eventsVersion": "1.0",
+  "harness": "sdlc",
+  "harnessVersion": "0.1.0",
+  "rubricVersion": "1.0",
+  "specName": "property-focus",
+  "generatedAt": "2026-11-02T06:44:18Z",
+  "specStatus": "in-progress",
+  "velocity": {
+    "wallClockMinutes": 313,
+    "timeToPrMinutes": null,
+    "sessionCount": 1,
+    "phaseDurationsMinutes": {
+      "planning": 0,
+      "taskGeneration": 46,
+      "implementation": 267,
+      "testing": 0,
+      "review": 0,
+      "houseKeeping": 0,
+      "postMortem": 0
+    }
+  },
+  "lifecycle": {
+    "furthestPhase": "Implementation",
+    "stalled": false
+  },
+  "throughput": {
+    "subTasksTotal": 456,
+    "subTasksCompleted": 87,
+    "completionRatio": 0.1907
+  },
+  "autonomy": {
+    "hardGateInterventions": 1,
+    "resumeCount": 0,
+    "reviewFixCycles": 0,
+    "subAgentDispatches": 19,
+    "postMortemActionItems": 0,
+    "autonomousCompletion": false,
+    "postPrRevisionCycles": 0
+  },
+  "quality": {
+    "reviewFindings": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "crossLensConvergence": 0,
+    "significantSpecDeviations": 0,
+    "planDrift": {
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "postPanelReview": {
+      "runs": 0,
+      "firstKept": null,
+      "firstRefuted": null,
+      "firstOutOfScope": null
+    }
+  },
+  "cost": {
+    "filesCreated": 127,
+    "filesModified": 1,
+    "filesDeleted": 0,
+    "linesAdded": 31542,
+    "linesRemoved": 1
+  },
+  "scopeDelta": {
+    "plannedFiles": 0,
+    "actualFiles": 128,
+    "deltaFiles": 128
+  },
+  "pr": {
+    "prIds": [],
+    "prUrls": []
+  },
+  "parseHealth": {
+    "eventsValid": 25,
+    "eventsMalformed": 0,
+    "eventsUnknownType": 0,
+    "eventsReviewRounds": 0,
+    "eventsJsonl": true,
+    "statusMd": true,
+    "taskSpec": true,
+    "reviewMd": false,
+    "driftSummaryBlock": false,
+    "masterPlanMd": true,
+    "gitStats": true
+  },
+  "tokensUsd": null
+}

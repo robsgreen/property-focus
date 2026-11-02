@@ -9,7 +9,7 @@ PR: (none)
 
 - [x] **Planning**
 - [x] **Task Generation**
-- [ ] **Implementation**
+- [x] **Implementation**
 - [ ] **Testing**
 - [ ] **Documentation**
 - [ ] **Review**
@@ -44,3 +44,5 @@ PR: (none)
 - 2026-11-02 05:28 - Task 0.14 complete (dual-era protocol; 97 integration; metadata has DCR, no CIMD flag); option C recorded (f22c1a4)
 - 2026-11-02 06:20 - Task 0.10 complete (make verify green, 100 integration; local dogfood dry run passed; no live steps run)
 - 2026-11-02 06:31 - Task 0.11 complete (CI workflow; make verify incl. be-int green)
+- 2026-11-02 06:44 - Phase 0 implementation complete except live gate items 0.12.1 (macOS bootstrap), 0.12.3 (recorded CI run; needs push), 0.12.5 (dogfood smoke; needs CP-0.B + approval) — carried to the PR gate
+- 2026-11-02 06:44 - Phase → Testing (phase 0 scope)
