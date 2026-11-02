@@ -34,3 +34,4 @@ PR: (none)
 - 2026-11-02 02:17 - Phase → Implementation
 - 2026-11-02 02:26 - Task 0.1 complete (make verify green, 24 unit tests); .sdlc links now point at the phase worktree copy
 - 2026-11-02 02:35 - Tasks 0.2 (112 unit tests) and 0.9 (13 infra tests, synth, no AWS calls) complete
+- 2026-11-02 03:06 - Task 0.3 complete (117 unit, 15 integration); A4 Keycloak decision applied to register/plan/tasks (37b3eb1); new Task 0.13
