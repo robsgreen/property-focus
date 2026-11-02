@@ -40,3 +40,4 @@ PR: (none)
 - 2026-11-02 04:03 - Tasks 0.5 (MCP skeleton) and 0.8 (frontend) complete; make verify green
 - 2026-11-02 04:29 - API spend limit interrupted 0.7 and the MCP doc update; resumed on user request. MCP research: 2026-07-28 is latest; adding dual-era MCP + Keycloak CIMD as Task 0.14 (under A3)
 - 2026-11-02 04:40 - Task 0.7 complete (make verify green, 76 integration); Task 0.14 (dual-era MCP + CIMD) added to plan/tasks (afbad70)
+- 2026-11-02 05:21 - Task 0.14 blocked on Keycloak CIMD vs DCR redirect rules; user chose C: keep CIMD (and resource-indicators) off for now, DCR stays as is; dual-era MCP protocol done (2397030)
