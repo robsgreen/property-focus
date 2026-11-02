@@ -13,7 +13,7 @@ PR: (none)
 - [x] **Testing**
 - [x] **Documentation**
 - [x] **Review**
-- [ ] **Wrap-up**
+- [x] **Wrap-up**
 - [ ] **PR**
 - [ ] **Archive**
 
@@ -65,3 +65,4 @@ PR: (none)
 - 2026-11-02 14:04 - Post-mortem written (drift H2/M9/L2, 13 action items)
 - 2026-11-02 14:10 - Retro: docs/specs/202611/property-focus-phase-0.md (2c65638); docs updated: operations.md (CP-0.B), telemetry.md (N6), gate evidence refreshed at 71694cd
 - 2026-11-02 14:11 - Post-mortem follow-ups carried into plan/tasks (dcd06fd): rls.sql frozen refs, 9.2.1 naming, P49 cleanup 5.10.6-7, Cognito sign-out 9.7.7, P46 5.5.6, P43 2.2.8, resolved decisions
+- 2026-11-02 14:15 - Gate 0.12.4 re-run at HEAD incl. real-browser sign-out (351b6e5). Wrap-up complete → PR gate

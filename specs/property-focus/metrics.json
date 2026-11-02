@@ -5,11 +5,11 @@
   "harnessVersion": "0.1.0",
   "rubricVersion": "1.0",
   "specName": "property-focus",
-  "generatedAt": "2026-11-02T14:01:07Z",
+  "generatedAt": "2026-11-02T14:15:35Z",
   "specStatus": "in-progress",
   "velocity": {
-    "wallClockMinutes": 750,
-    "timeToPrMinutes": null,
+    "wallClockMinutes": 764,
+    "timeToPrMinutes": 764,
     "sessionCount": 1,
     "phaseDurationsMinutes": {
       "planning": 0,
@@ -18,24 +18,24 @@
       "testing": 19,
       "review": 409,
       "houseKeeping": 9,
-      "postMortem": 0
+      "postMortem": 14
     }
   },
   "lifecycle": {
-    "furthestPhase": "Review",
+    "furthestPhase": "Wrap-up",
     "stalled": false
   },
   "throughput": {
-    "subTasksTotal": 456,
+    "subTasksTotal": 461,
     "subTasksCompleted": 87,
-    "completionRatio": 0.1907
+    "completionRatio": 0.1887
   },
   "autonomy": {
     "hardGateInterventions": 3,
     "resumeCount": 0,
     "reviewFixCycles": 1,
-    "subAgentDispatches": 39,
-    "postMortemActionItems": 0,
+    "subAgentDispatches": 43,
+    "postMortemActionItems": 13,
     "autonomousCompletion": false,
     "postPrRevisionCycles": 0
   },
@@ -47,11 +47,11 @@
       "low": 26
     },
     "crossLensConvergence": 0,
-    "significantSpecDeviations": 0,
+    "significantSpecDeviations": 11,
     "planDrift": {
-      "high": 0,
-      "medium": 0,
-      "low": 0
+      "high": 2,
+      "medium": 9,
+      "low": 2
     },
     "postPanelReview": {
       "runs": 0,
@@ -61,23 +61,23 @@
     }
   },
   "cost": {
-    "filesCreated": 150,
+    "filesCreated": 151,
     "filesModified": 1,
     "filesDeleted": 0,
-    "linesAdded": 35304,
+    "linesAdded": 35746,
     "linesRemoved": 1
   },
   "scopeDelta": {
     "plannedFiles": 0,
-    "actualFiles": 151,
-    "deltaFiles": 151
+    "actualFiles": 152,
+    "deltaFiles": 152
   },
   "pr": {
     "prIds": [],
     "prUrls": []
   },
   "parseHealth": {
-    "eventsValid": 55,
+    "eventsValid": 60,
     "eventsMalformed": 0,
     "eventsUnknownType": 0,
     "eventsReviewRounds": 4,
@@ -85,7 +85,7 @@
     "statusMd": true,
     "taskSpec": true,
     "reviewMd": true,
-    "driftSummaryBlock": false,
+    "driftSummaryBlock": true,
     "masterPlanMd": true,
     "gitStats": true
   },
