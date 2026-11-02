@@ -46,3 +46,4 @@
 {"ts":"2026-11-02 08:02","event":"review_round","round":2,"critical":0,"high":1,"medium":0,"low":2,"crossLens":0}
 {"event":"user_intervention","ts":"2026-11-02 09:03","reason":"review-cap-extra-fix"}
 {"event":"dispatch","ts":"2026-11-02 09:03","agent":"sdlc-coder"}
+{"event":"dispatch","ts":"2026-11-02 09:16","agent":"sdlc-reviewer"}
