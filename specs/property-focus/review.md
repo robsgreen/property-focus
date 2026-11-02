@@ -85,3 +85,6 @@ Severity / origin / class / seats. "X" = raised independently by both seats (cro
 - Repro not confirmed: P15 backend/src/property_focus/runtime/launcher.py:174 — A,B — needs Step Functions emulator.
 - Repro not confirmed: P34/P35 — live host / supply-chain condition.
 - Supply chain: dev dependency `httpx2==2.16.0` — PyPI project URLs point to github.com/pydantic/httpx2 (22 releases); GitHub repo not reachable from this session.
+
+## Panel reproductions
+- P1: reviewer-right — `npx vitest run tests/sign-out.test.tsx` (copy of frontend/) failed 4/4: navigations `["/realms/synthetic/logout","/realms/synthetic/authorize"]`, expected only logout. Regression test passed to the Fix Once coder.
