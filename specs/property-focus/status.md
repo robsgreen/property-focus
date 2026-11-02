@@ -80,3 +80,4 @@ PR: (none)
 - 2026-11-02 15:49 - Edge settings + hostname rename applied (b90d40c; make verify green). Phase → Documentation (round 2)
 - 2026-11-02 15:52 - Documentation: docs updated (ce7de04) → Phase → Review (round 2 scope c9e474f..HEAD)
 - 2026-11-02 16:00 - Review round 2 consolidated: 0 crit/high, 4 med, 4 low; all selected; fix dispatched
+- 2026-11-02 16:16 - Round 2 fixes 6e77af1 (R1-R8); make verify green (451 unit, 193 int); scoped re-review dispatched
