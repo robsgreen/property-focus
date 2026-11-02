@@ -72,3 +72,8 @@
 {"event":"dispatch","ts":"2026-11-02 15:32","agent":"sdlc-tester"}
 {"event":"user_intervention","ts":"2026-11-02 15:39","reason":"edge-settings"}
 {"event":"dispatch","ts":"2026-11-02 15:42","agent":"sdlc-coder"}
+{"event":"phase_start","ts":"2026-11-02 15:49","phase":"houseKeeping"}
+{"event":"dispatch","ts":"2026-11-02 15:49","agent":"sdlc-doc-keeper"}
+{"event":"phase_start","ts":"2026-11-02 15:52","phase":"review"}
+{"event":"dispatch","ts":"2026-11-02 15:52","agent":"sdlc-reviewer"}
+{"event":"dispatch","ts":"2026-11-02 15:52","agent":"sdlc-reviewer"}
