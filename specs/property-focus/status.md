@@ -51,3 +51,5 @@ PR: (none)
 - 2026-11-02 07:12 - Documentation: docs updated (616d15e: AGENTS.md, CLAUDE.md, README.md, docs/system/architecture.md + 10 module docs)
 - 2026-11-02 07:12 - Phase → Review
 - 2026-11-02 07:15 - Review round 1 dispatched: 2 seats x 4 scopes (opus/opus); mechanical checks all pass
+- 2026-11-02 07:29 - Review round 1 consolidated: 1 critical, 22 medium, 22 low; Tier 1 gate (MCP surface); 3 needs-user-decision
+- 2026-11-02 07:29 - Fix Once: backend and infra coders dispatched in parallel (disjoint files); P1 repro tester running; frontend coder follows repro

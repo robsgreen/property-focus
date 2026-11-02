@@ -15,3 +15,73 @@ Check: make fe → pass
 Check: make infra → pass
 Check: pnpm --filter @property-focus/infra build → pass
 Check: pnpm lint:md → pass
+
+## Contract tier
+
+Overall: **Tier 1** (most restrictive supported). Seat A (backend 1–2): the MCP endpoint (`POST /mcp`, dual-era wire behavior), `/.well-known/oauth-protected-resource` and the 401 `WWW-Authenticate resource_metadata` challenge are consumed by third-party MCP clients acting for self-registered account holders (A1, A3). Seat B (backend 1–2) rated Tier 3 (owner's own clients, greenfield). All other surfaces Tier 3.
+Tier 1/2 gate: OPEN — requires the user's recorded direction for human review before PR progression.
+
+## Findings (round 1)
+
+Severity / origin / class / seats. "X" = raised independently by both seats (crossLens).
+
+### Selected for Fix Once
+- P1 critical, introduced, logic — `frontend/src/auth/session.ts:219-226`, `router.tsx:37-43`: signOut clears tokens and notifies subscribers before navigating to the end-session endpoint; SignInBoundary starts a sign-in whose authorize navigation lands last, so the issuer's SSO session signs the user back in (B; jsdom repro run). Merged with A's sign-out-failure finding (P2).
+- P2 medium, introduced, logic — `session.ts:214-221`: signOut throws when discovery lacks `end_session_endpoint` (tokens already cleared, rejection discarded) → silent re-sign-in; provider-neutral claim in web-app.md false for Cognito (A). Escalated (same user-visible defect as P1).
+- P3 medium, introduced, logic, X — `frontend/src/api/baseApi.ts`: non-JSON error bodies (PARSING_ERROR) lose HTTP status; non-JSON 401 never ends the session (both seats ran repros). Escalated.
+- P4 medium, introduced, logic — no tests for router/SignInBoundary/SignInCallback/baseApi (B). Escalated.
+- P5 low, introduced, X — health routes lack `operation_id` → generated hooks `useLiveHealthLiveGetQuery` etc.; plus `result_refs: list[Any]` → `any[]` (A,B; Concepts and vocabulary / Red flag — Vague Name). Selected (vocabulary/red flag).
+- P6 medium, introduced, logic, X — runtime engine recipe and URL↔password-secret pairing repeated in 5 places (`cli.py`, `run_task.py`, `rest/app.py`, `mcp/server.py`, `migrations/env.py`) (Red flag — Repetition / Information Leakage). Red-flag finding.
+- P7 medium, introduced, logic, X — `playwright` runtime dependency unused until phase 2; ships in every image. Escalated.
+- P8 medium, introduced, logic, X — AGENTS.md/architecture say application reaches infrastructure only through ports; `workflows.py`/`context.py` import `adapters.db`/`adapters.telemetry`; checker enforces only rest/mcp. Escalated (fix: make docs and checker match the code).
+- P9 medium, introduced, logic, X — lease exhaustion (max_attempts → internal_defect), past-deadline (timeout) and stranded-QUEUED repair paths untested. Escalated.
+- P10 medium, introduced, logic — telemetry redaction: structured-key list and free-text `key=value` list disagree (`code_verifier` attribute kept; `ssn`/`iban`/`credit_card`/`net_worth` in text kept) (B; repro run; Red flag — Repetition). Red-flag finding.
+- P11 medium, introduced, logic — workflow-run read use case lives in the REST route; MCP parity test re-implements it, so parity is vacuous (B; Red flag — Repetition). Red-flag finding. Includes P20 (ExecutionContext→scope).
+- P12 medium, introduced, logic — vocabulary: account vs tenant and principal vs user name the same concepts (B; Concepts and vocabulary). Escalated vocabulary finding.
+- P13 medium, introduced, logic — vocabulary: `duplicate` means three things; FAILED/WAITING_FOR_USER runs report "duplicate" (B; Concepts and vocabulary). Escalated vocabulary finding.
+- P14 medium, introduced, logic — `rls.sql` lives in the adapter package but is executed by released-at-merge migration 0001; an edit silently rewrites it (B; Information Leakage). Red-flag finding.
+- P15 medium, introduced (latent), logic, X — Step Functions execution name = `run.id.fencing_token`; a failure before lease acquisition makes every relaunch hit ExecutionAlreadyExists and report success → run stuck until deadline. Escalated.
+- P16 medium, introduced, mechanical — `create_database_engine` lacks `hide_parameters=True`; SQL parameters (emails) appear in exception logs (A; repro run). Gating-mechanical.
+- P17 low, introduced, mechanical — uvicorn access log enabled (logs query strings, MCP too) `cli.py:105` (A). Gating-mechanical.
+- P18 low, introduced, mechanical — `dispose_failure`/`FailureDisposition` vague name (B; Concepts and vocabulary). Gating-mechanical.
+- P19 low, introduced, X — REST Literals not pinned to model state/tier constants (Red flag — Repetition; A mechanical, B logic → logic). Red-flag finding.
+- P20 low, introduced, logic, X — `Account`/`AccountScope`/`ExecutionContext` repeat the same ID pair; add a scope property (Red flag — Repetition). Red-flag finding (fixed with P11/P12).
+- P21 low, introduced, logic, X — `Lease.tenant_id` duplicates `Lease.scope` (Red flag — Repetition). Red-flag finding.
+- P22 low, introduced, mechanical — dead guard `check_transition("QUEUED","RUNNING")` `workflows.py:596-598` (A). Gating-mechanical.
+- P23 low, introduced, logic — `deadline_at` nullable though always written; `_NO_DEADLINE` handles an impossible NULL (B; Avoidable Error Case). Red-flag finding.
+- P24 low, introduced, logic — repair query has no supporting index (B). Escalated (0001 unreleased; cheap now).
+- P25 low, introduced, logic — concurrent `admit_run` raises raw IntegrityError → non-retryable internal_defect (A). Escalated.
+- P26 low, introduced, logic — DB failure in `authenticate` → MCP plain 500 / REST non-retryable 500; should be `dependency_transient` 503 (B). Escalated.
+- P27 low, introduced, logic — retries actually bounded by the 5-minute repair cadence; docs claim 2s/4s/8s (B). Escalated (docs).
+- P28 low, introduced, logic — health probes logged at INFO every 5 s (A). Escalated.
+- P29 low, introduced, logic — MCP rejects JSON-RPC batches for 2025-03-26 (A). Escalated (document as unsupported).
+- P30 medium, introduced, logic — SSRF: anonymous DCR validates only `redirectUris`; Keycloak fetches `sector_identifier_uri`/`request_uri` and accepts `backchannel_logout_uri` to any host incl. metadata IP (A; repro run against local Keycloak). Escalated (security).
+- P31 medium, introduced, logic — realm has no password policy; 1-char password accepted on public self-sign-up (A; repro run). Escalated (security).
+- P32 medium, introduced, logic, X — Caddyfile and collector config single-file bind mounts never refresh on redeploy (both seats repro'd locally).
+- P33 medium, introduced, logic, X — env file parsed three ways; values with `$` diverge (SMTP password written as `$$`; operator compose gets different secrets) (both seats repro'd).
+- P34 medium, introduced, logic, X — new web build goes live before deploy.sh runs; rollback can't restore web; `--delete` breaks open sessions; rollback leaves old compose for Keycloak.
+- P35 medium, introduced, logic, X — deploy workflow writes the host SSH key before running tag-pinned actions/installs; checkout lacks persist-credentials:false; setup-uv unpinned. Escalated (security).
+- P36 medium, introduced, mechanical — planning IDs (CP-0.B, Task 5.10) in operator-facing messages and docs (B; Concepts and vocabulary). Escalated vocabulary.
+- P37 low, introduced, logic — Caddy SPA fallback answers `/.well-known/*`, `/authorize`, `/register` with 200 HTML (B). Escalated.
+- P38 low, introduced, X — CI never type-checks CDK, never builds images or validates dogfood compose (A mechanical, B logic → logic). Escalated.
+- P39 low, introduced, mechanical, X — `.env.example` references nonexistent `make test-live`. Gating-mechanical.
+- P40 low, introduced, logic — CI filter: keycloak/docker/dogfood changes select `cdk` (reads none) and skip `integration` (client-neutrality scan reads dogfood) (A mechanical, B logic → logic). Escalated.
+- P41 low, introduced, logic — dogfood containers lack no-new-privileges/cap_drop/limits (A). Escalated (defense in depth with P30).
+- P42 low, introduced, logic — CDK account guard runs only at synth; a synthesized template deploys to any account (A). Escalated.
+
+### Observations (not selected)
+- P43 low, introduced (latent), logic — FAILED/PARTIAL→QUEUED transitions exist but `attempt_count` never resets (B). No requeue use case yet; revisit when one lands.
+- P44 low, introduced, logic — `PF_DATA_MODE` parsed but unread (A). Plan defines it; keep.
+- P45 low, introduced, logic — `smoke_dogfood.py` imports test helpers (A). Accepted: reuse is intentional; revisit if it breaks.
+- P46 low, introduced (latent), logic — API 401 → re-sign-in loop if API rejects every fresh token (A). No query-issuing page in phase 0; carried to phase 1.
+
+## Needs user decision
+- P47 `backend/src/property_focus/application/ports.py:229` — Does `TaskInput.task_version` mean the task handler's logic version or the application build version?
+- P48 `infrastructure/dogfood/Caddyfile` — Should 2025-03-26 MCP clients be able to sign in on dogfood (needs `/.well-known/oauth-authorization-server` on the app host), or is 2025-03-26 support protocol-level only?
+- P49 `infrastructure/keycloak/realm-property-focus.json:524-533` — The anonymous-registration client cap (100, counting built-ins) can be exhausted by unauthenticated spam, blocking new MCP clients. Rate-limit registration at Caddy, auto-expire unused registrations, or accept?
+
+## Warnings
+- Repro not confirmed: P1 frontend/src/auth/session.ts:219 — B — navigation order confirmed in jsdom; real-browser abort not run.
+- Repro not confirmed: P15 backend/src/property_focus/runtime/launcher.py:174 — A,B — needs Step Functions emulator.
+- Repro not confirmed: P34/P35 — live host / supply-chain condition.
+- Supply chain: dev dependency `httpx2==2.16.0` — PyPI project URLs point to github.com/pydantic/httpx2 (22 releases); GitHub repo not reachable from this session.
