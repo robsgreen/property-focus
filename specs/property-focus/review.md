@@ -125,3 +125,19 @@ N1 leaks, N2, N3, P47, P48: resolved (reviewer probed 44 shapes; Caddy routing r
 - N4 high, introduced (6c2fdf5/c188e47), logic — backend/src/property_focus/adapters/telemetry.py:113,119-122,160: redaction regexes do quadratic work on crafted input; Starlette OTel middleware records client-controlled User-Agent/path/query and the redacting span processor runs synchronously on the request path. Reviewer: unauthenticated GET with `User-Agent: "a-"*7000` blocked the event loop 3.1 s. Orchestrator confirmed `redact_text("a-"*7000)` = 2.4 s. UNRESOLVED.
 - N5 low, introduced (6c2fdf5), logic — is_sensitive_key misses `passWord`/`PassWord` after the camelCase split. Observation.
 - Pre-existing notes: quoted values with spaces partly redacted; `_password=x` not redacted; percent-encoded nested `token` passes; SignInFailure retry drops a second rejection.
+- User direction (2026-11-02 13:38): one more targeted fix pass for N4 (+N5) with a scoped check.
+
+## Scoped check of 71694cd (N4, N5)
+- N4 resolved: linear on ~70 adversarial shapes (1 MB/250 KB ratio 2.2–6.2; worst 0.87 s/MB); full middleware path ≤1.03 s/MB; h11 caps headers at 16 KB so real requests cost ≤~16 ms. Orchestrator timed 1 MB hostile lines at 0.07–0.24 s.
+- N5 resolved; no realistic false positives across 9,363 repo identifiers.
+- Leak corpus (113 strings) vs c188e47: 8 newly redacted, 1 intentionally unredacted (`x-eyJ…` JWT glued after a hyphen; documented; JWTs still caught after separators and as sensitive-key values) — accepted.
+- N6 low, introduced, mechanical — docs/system/modules/telemetry.md:47 says "well under a second"; measured worst ≈0.87 s/MB. Observation (surfaced at two-round cap).
+- Observation: test_redaction_takes_linear_time_on_long_crafted_text uses a 1.0 s bound vs 0.30 s measured; could be flaky on a ~3× slower runner.
+
+## Final checks (HEAD 71694cd)
+Check: make verify (be-check, be-unit 405, be-int 172, be-replay, check-generated, fe 33, infra 15 + tsc + synth) → pass
+Check: pnpm lint:md → pass
+Final checks: pass
+
+## Review complete
+No unresolved critical/high or gating-mechanical findings. Tier 1 gate: user will review personally (recorded). Observations to present at the PR gate: P43–P46, N2-era observations resolved, N3/N5 resolved, N6, flaky-bound note, P49 accepted risk.

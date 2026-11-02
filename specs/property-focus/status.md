@@ -12,7 +12,7 @@ PR: (none)
 - [x] **Implementation**
 - [x] **Testing**
 - [x] **Documentation**
-- [ ] **Review**
+- [x] **Review**
 - [ ] **Wrap-up**
 - [ ] **PR**
 - [ ] **Archive**
@@ -60,3 +60,5 @@ PR: (none)
 - 2026-11-02 09:07 - CP-0.B answered: dogfood domain propertyfocus.treb.tech (app) + auth.propertyfocus.treb.tech (Keycloak, proposed split, not objected); SMTP relay Mailgun (smtp.mailgun.org:2525; credentials to be set as deployment secrets, not in chat). To record in gate evidence + operations docs after the current fix pass.
 - 2026-11-02 09:16 - Extra fix pass c188e47 (N1, N2, N3, P47, P48): make verify green; N1 examples confirmed redacted; scoped review dispatched
 - 2026-11-02 09:44 - Extra-pass review: N4 high (redaction ReDoS) unresolved; escalated to user
+- 2026-11-02 13:53 - Fix 71694cd (N4, N5): orchestrator timed 1 MB adversarial lines 0.07-0.24 s; make verify green; scoped check dispatched
+- 2026-11-02 14:01 - Review complete (final checks pass) → Phase → Wrap-up

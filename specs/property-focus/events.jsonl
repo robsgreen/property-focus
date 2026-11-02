@@ -48,3 +48,8 @@
 {"event":"dispatch","ts":"2026-11-02 09:03","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-02 09:16","agent":"sdlc-reviewer"}
 {"ts":"2026-11-02 09:44","event":"review_round","round":3,"critical":0,"high":1,"medium":0,"low":1,"crossLens":0}
+{"event":"user_intervention","ts":"2026-11-02 13:38","reason":"review-cap-extra-fix-2"}
+{"event":"dispatch","ts":"2026-11-02 13:38","agent":"sdlc-coder"}
+{"event":"dispatch","ts":"2026-11-02 13:53","agent":"sdlc-reviewer"}
+{"ts":"2026-11-02 14:01","event":"review_round","round":4,"critical":0,"high":0,"medium":0,"low":1,"crossLens":0}
+{"event":"phase_start","ts":"2026-11-02 14:01","phase":"postMortem"}
