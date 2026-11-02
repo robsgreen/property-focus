@@ -8,7 +8,7 @@ Scope: greenfield real-estate intelligence monorepo
 
 The repository root anchors paths in this document; `/specs` means a directory inside the repository, not the operating system root.
 
-The user's decision register ([architecture-decisions.md](architecture-decisions.md), cited as D1–D56) wins on any conflict with this plan.
+The user's decision register ([architecture-decisions.md](architecture-decisions.md), cited as D1–D56, plus amendments A1–A3 confirmed by the user on 2026-11-02) wins on any conflict with this plan. An amendment wins over the decision it amends.
 
 ---
 
@@ -28,7 +28,7 @@ flowchart LR
     Notes --> Choice[Buyer decides whether to investigate]
 ```
 
-The proposed product acts as a personal real-estate analyst. It interprets every qualifying property for you: why it fits, why it does not, what is concerning, and whether it is worth seeing (D1). A **tenant** represents a private household or buying team. In V1 each tenant shares one active household preference profile (D5).
+The proposed product acts as a personal real-estate analyst. It interprets every qualifying property for you: why it fits, why it does not, what is concerning, and whether it is worth seeing (D1). Each person signs up for their own account. A **tenant** is that account: the boundary for one person's private data, such as their preference profile, notes and destinations (A1). A user can share a search with other accounts, such as a spouse's, and collaborate on it.
 
 ### Two products for residential buyers
 
@@ -36,29 +36,64 @@ A Homebuyer asks whether a property fits daily life and what to check on a visit
 
 | Experience | Onboarding and feed | Property page and next action |
 |---|---|---|
-| Homebuyer · `/homebuyer` | Run the household preference interview, then start a home search with budget and geography. Rank homes by fit. | Lead with fit, layout, location, affordability and unknowns. Shortlist a home or flag a question for a visit. |
+| Homebuyer · `/homebuyer` | Run the preference interview, then start a home search with budget and geography, optionally shared with a spouse or partner. Rank homes by fit. | Lead with fit, layout, location, affordability and unknowns. Shortlist a home or flag a question for a visit. |
 | Investor · `/investor` | Start an acquisition search with financing assumptions and income criteria. Rank by the search's investment criteria. | Lead with units, occupancy, documented rents, expenses and projected cash flow. Compare purchase scenarios and their binding constraints. |
 
 A **search subscription** is an entry mechanism, not the main product object (D17). It holds a source, search criteria and a notification policy. It also carries an acquisition strategy and the criteria specific to that strategy. The property remains the object you inspect.
 
-The two experiences arrived after the register fixed one household profile per tenant. We reconcile them in layers. The tenant keeps one active **PreferenceProfile**: household needs, lifestyle goals, destinations and shared tradeoffs. Each subscription layers its strategy's budget, financing assumptions and investment criteria on that profile.
+Searches are where people collaborate. Each person keeps one private **PreferenceProfile**: lifestyle goals, preferences, hard requirements, destinations and tradeoffs. A search carries its own criteria, and its members share them (A1).
 
-| Layer | Count per tenant | Holds |
-|---|---|---|
-| PreferenceProfile | One active (D5) | Lifestyle goals, preferences and hard requirements about the home, destinations, tradeoffs, examples |
-| SearchSubscription | Many | Source, geography and listing criteria, notification policy, strategy (`owner_occupancy`, `live_in_and_rent`, `rental_hold`), budget, financing and investment criteria |
+| Layer | Owned by | Visible to | Holds |
+|---|---|---|---|
+| PreferenceProfile | One account; one active profile per account | Its owner only | Lifestyle goals, preferences and hard requirements about the home, destinations, tradeoffs, examples |
+| SearchSubscription | One owner account, plus invited members | Its owner and members | Source, geography and listing criteria, notification policy, strategy (`owner_occupancy`, `live_in_and_rent`, `rental_hold`), hard and soft criteria, preferences copied from a member's profile, search destinations, budget, financing and investment criteria |
+
+A profile reaches a search only by copy. When a member creates a search, or later chooses to apply their profile, the system copies that profile's requirements and preferences into a new search version. Later edits to the private profile leave the search unchanged until someone applies it again.
+
+We recommend copying over live merging (plan recommendation). Merging two people's private profiles would need rules for conflicting weights, would expose private data to the other member, and would let one person's private edit silently change a shared ranking.
 
 ```mermaid
 flowchart LR
     H[Homebuyer pages] --> S[Search subscription and strategy]
     I[Investor pages] --> S
-    P[Household PreferenceProfile] --> M[Shared evaluation and scenario calculations]
-    S --> M
+    P[Member's private PreferenceProfile] -->|Copy on create or apply| S
+    S --> M[Evaluation and scenario calculations]
     E[Authorized property and unit evidence] --> M
-    M --> R[Subscription-specific evaluations]
+    M --> R[Search evaluations, visible to members]
 ```
 
-We recommend that a `rental_hold` subscription skip the household Lifestyle fit dimension and the household-lifestyle hard requirements, because a household's commute does not bear on a rental's merit. The Risks table asks the user to confirm this rule.
+We recommend that a `rental_hold` search skip the Lifestyle fit dimension (plan recommendation). Copying a profile into a `rental_hold` search leaves out hard requirements about the buyer's own daily life (preference category `household_lifestyle`), because the buyer's commute does not bear on a rental's merit.
+
+### Accounts and shared searches
+
+The user account is the isolation boundary for private data. A shared search is a collaboration scope: its members see and edit that search's data and nothing else of each other's (A1).
+
+| Data | Who has access |
+|---|---|
+| Preference profile, interview sessions, profile destinations and their travel times | The account owner only |
+| Notes, likes and dislikes | Their author only, even on a shared search |
+| Offer scenarios and offer outcomes | The account that created them (plan recommendation; the user's answer did not list them as shared) |
+| Search criteria and versions, copied preferences, search destinations, evaluations, shortlist, visit questions | Every current member of the search |
+| Tours | Every current member of the search (plan recommendation) |
+| Property facts and intelligence | Every account the source rights allow (D7) |
+
+The owner invites people by email address. The invitee accepts while signed in to an existing account, or signs up first and then accepts. Removing a member revokes access on that member's next request.
+
+```mermaid
+sequenceDiagram
+    participant Owner as Search owner
+    participant App as Application
+    participant Invitee as Invitee
+    Owner->>App: Invite spouse by email
+    App->>Invitee: Invitation email with single-use link
+    Invitee->>App: Sign in or sign up, then accept
+    App-->>Invitee: Member of the search
+    Owner->>App: Remove member
+    Invitee->>App: Open the search
+    App-->>Invitee: 404 Not Found
+```
+
+We recommend that only the owner invites or removes other members, that any member may leave, and that the owner can neither leave nor be removed (plan recommendation). Otherwise the owner and members hold the same rights on the search. Any member may approve a material change to the search's criteria, and the system records who approved (see Preferences).
 
 ### The problem
 
@@ -135,13 +170,13 @@ The REST API is resource-oriented (D30). Reads and edits use resources such as `
 We recommend serving MCP beside the REST API, so remote agents need no local process:
 
 - **Transport.** MCP uses the streamable HTTP transport at `/mcp`.
-- **Sign-in.** MCP clients sign in through Cognito with the web app's authorization code and PKCE flow, shown under Deployment, authentication, and operations.
+- **Sign-in.** Any MCP client that implements the MCP authorization specification signs in through Cognito with OAuth authorization code and PKCE, the web app's flow shown under Deployment, authentication, and operations (A3). We build nothing for a particular client.
 - **Token check.** Each MCP request carries a bearer access token. One shared check maps it to the internal user and tenant for both adapters (D28).
 - **No HTTP proxy.** The MCP server calls application services directly, never FastAPI over HTTP (D29).
 
 #### Property pipeline
 
-Property understanding happens once per property and serves every tenant (D7). Sources emit observations; normalization and identity resolution follow; deterministic hard filters drop properties no active subscription could accept (D3); intelligence runs on the survivors; tenant evaluation comes last.
+Property understanding happens once per property and serves every tenant (D7). Sources emit observations; normalization and identity resolution follow; deterministic hard filters drop properties no active subscription could accept (D3); intelligence runs on the survivors; search evaluation comes last.
 
 ```mermaid
 flowchart LR
@@ -150,7 +185,7 @@ flowchart LR
     Identity --> Filter[Deterministic hard pre-filter]
     Filter -->|Survives| Baseline[Baseline analysis]
     Filter -->|Rejected by every subscription| Stop[Listing facts only]
-    Baseline --> Eval[Tenant evaluation]
+    Baseline --> Eval[Search evaluation]
     Eval --> Trigger{Deep research trigger}
     Trigger -->|AUTO, MANUAL or EXPERIMENT| Deep[Deep research]
     Deep --> Eval
@@ -158,7 +193,7 @@ flowchart LR
 
 A **property source** is any adapter that emits source observations: the MLS mailbox, the TheMLS browser, a manual add by URL or address, an uploaded document (D2, D17). Sources never write canonical properties. Adding Zillow, Redfin or a RESO feed later means adding a source, not changing the property domain.
 
-The pre-filter evaluates listing facts against each active subscription's effective hard requirements: the subscription's hard criteria plus the household profile's hard requirements that apply to its strategy. A property survives when at least one subscription returns pass or unknown; unknown never counts as false (D7). Funnel stages carry versions so engineers can run a candidate stage in shadow beside the current one (D3).
+The pre-filter evaluates listing facts against each active subscription's effective hard requirements: the search version's hard criteria, which include any profile hard requirements a member copied into the search. A property survives when at least one subscription returns pass or unknown; unknown never counts as false (D7). Funnel stages carry versions so engineers can run a candidate stage in shadow beside the current one (D3).
 
 #### Execution model: on-demand tasks
 
@@ -166,7 +201,7 @@ The system spends most of its time idle, so it runs no always-on worker fleet (D
 
 DigitalOcean dogfood emulates the same model with on-demand processes and containers. A scheduler daemon starts short-lived task processes and does no business work itself. The always-on services are Postgres, MiniStack, the API and MCP services (D27), the reverse proxy, the observability stack and that scheduler.
 
-The register sets IMAP polling every 15 to 30 seconds (D22). Neither EventBridge Scheduler nor cron fires faster than once a minute, so we recommend one short-lived `imap-poll` invocation per minute. It polls at 20-second intervals (configurable within 15 to 30), stops starting polls after 45 seconds, and exits. A Postgres advisory lock prevents overlapping invocations.
+The register sets IMAP polling every 15 to 30 seconds (D22). Neither EventBridge Scheduler nor cron fires faster than once a minute, so we recommend one short-lived `imap-poll` invocation per minute. It polls at 20-second intervals (configurable within 15 to 30), stops starting polls after 45 seconds, and exits. A Postgres advisory lock prevents overlapping invocations. On 2026-11-02 the user accepted that this schedule can leave an occasional gap above 30 seconds between polls.
 
 ```mermaid
 sequenceDiagram
@@ -240,7 +275,7 @@ Engineers use internal UUIDs for properties and listings. They scope external id
 | Claim | Immutable typed assertion about one attribute of a subject, supported by evidence |
 | Evidence asset | Content-addressed original or derived artifact with provenance |
 | AnalysisRun | One versioned analyzer or enricher execution and its outputs |
-| PropertyEvaluation | One tenant subscription's versioned assessment of one property |
+| PropertyEvaluation | One search subscription's versioned assessment of one property, visible to the search's members |
 
 ```mermaid
 flowchart LR
@@ -291,7 +326,7 @@ stateDiagram-v2
 
 Executable behavior stays in code. An attribute names a resolution rule from a code registry and passes scalar parameters; JSONB never holds expressions or a rule language (D33).
 
-V1 starts rich, because re-analyzing every property when a new household cares about a skipped feature costs more than extracting a broad profile once (D32). The target is roughly 75 to 150 standardized attributes plus extensible observations.
+V1 starts rich, because re-analyzing every property when a new buyer cares about a skipped feature costs more than extracting a broad profile once (D32). The target is roughly 75 to 150 standardized attributes plus extensible observations.
 
 | Category group | Example coverage |
 |---|---|
@@ -359,7 +394,7 @@ We use specialized analyzers instead of one giant multimodal prompt (D14). Each 
 | Baseline | TextAnalyzer, PhotoAnalyzer, ConditionAnalyzer, KitchenAnalyzer | IndoorOutdoorAnalyzer, YardAnalyzer, GarageAnalyzer |
 | Deep | FloorplanAnalyzer, LayoutAnalyzer | NaturalLightAnalyzer, PrivacyAnalyzer, GuestSuiteAnalyzer |
 
-Analyzers request capabilities, not vendors (D31). A `ModelRouter` maps a capability such as `VISION` or `STRUCTURED_OUTPUT` to a `ModelProvider` under model policy. The first analyzer brings the first provider; the team adds a second provider before claiming interchangeable-provider support. We propose OpenAI as that first adapter. No benchmark in the planning record favors it over Anthropic, so the choice stays open for the user.
+Analyzers request capabilities, not vendors (D31). A `ModelRouter` maps a capability such as `VISION` or `STRUCTURED_OUTPUT` to a `ModelProvider` under model policy. Two adapters, OpenAI and Anthropic, ship with the first analyzer set in phase 3 and pass the same provider contract (A2). Configuration, not analyzer code, says which provider serves each capability.
 
 ```mermaid
 flowchart LR
@@ -378,22 +413,22 @@ Each computation has an identity: the hash of its input evidence plus analyzer, 
 
 #### Reusable intelligence and tenant privacy
 
-Engineers separate property facts, location context, and market context from each tenant's preferences. Property facts are global; tenant interpretation is private.
+Engineers separate property facts, location context, and market context from each account's preferences and each search's criteria. Property facts are global; interpretation is private to one account or to one search's members.
 
 ```mermaid
 flowchart LR
-    Property[Property intelligence] --> Eval[Tenant evaluation]
+    Property[Property intelligence] --> Eval[Search evaluation]
     Location[Location intelligence] --> Eval
-    Travel[Tenant travel times] --> Eval
+    Travel[Travel times to search destinations] --> Eval
     Market[Market intelligence] --> Valuation[Valuation distribution]
     Property --> Valuation
     Valuation --> Eval
-    Profile[PreferenceProfile and subscription] --> Eval
-    Eval --> Strategy[Tenant offer strategy]
+    Search[Search version] --> Eval
+    Eval --> Strategy[Buyer offer strategy]
     Valuation --> Strategy
 ```
 
-Reuse depends on source rights. Engineers may share a canonical property identifier across tenants, but they must scope evidence and claims to the tenants or entitlement groups allowed to use them. A household's offer ceiling, private notes, source credentials, destinations and feedback remain tenant-private. A cached result must include its entitlement scope in the cache key.
+Reuse depends on source rights. Engineers may share a canonical property identifier across accounts, but they must scope evidence and claims to the accounts or entitlement groups allowed to use them. A person's offer scenarios, notes, likes and dislikes, source credentials and profile destinations remain private to their account. A cached result must include its entitlement scope in the cache key.
 
 Location intelligence is its own reusable subsystem (D42). It covers walkability, parks, schools, retail, freeway and airport proximity, hazards, lot position, commercial proximity and streetscape. Busy versus quiet street is a first-class attribute built from the traffic signals below. The product distinguishes measured traffic from an inference.
 
@@ -410,11 +445,18 @@ Location intelligence is its own reusable subsystem (D42). It covers walkability
 | Cut-through risk | Exposure to shortcut routing |
 | Cul-de-sac status | Whether the lot sits on a dead-end street | Protected demographic characteristics and proxies for steering do not enter suitability scores.
 
-Tenants define their important destinations, such as work, school, family or the airport, with times of day (D43). The system computes time-of-day travel times per property and destination. Destinations and their travel times stay tenant-private.
+People define their important destinations, such as work, school, family or the airport, with times of day (D43). The system computes time-of-day travel times per property and destination. A destination lives in one of two places:
+
+| Destination | Visible to | Feeds |
+|---|---|---|
+| Profile destination | Its owner only | Travel times shown only to that owner |
+| Search destination | The search's members | Travel times and the search's evaluation |
+
+On a shared search, each member sees the shared evaluation plus travel times to their own private destinations (plan recommendation).
 
 #### Preferences and the adaptive interview
 
-Preferences live in two layers (D34). Global **preference definitions** describe how people may care about ontology attributes, for example "quiet street" satisfied by low traffic level and cul-de-sac status. The tenant's PreferenceProfile assigns importance, acceptable alternatives, goals, tradeoffs and learned evidence.
+Preferences live in two layers (D34). Global **preference definitions** describe how people may care about ontology attributes, for example "quiet street" satisfied by low traffic level and cul-de-sac status. A person's PreferenceProfile assigns importance, acceptable alternatives, goals, tradeoffs and learned evidence.
 
 ```mermaid
 flowchart LR
@@ -424,9 +466,9 @@ flowchart LR
     Weight --> Ex[Example properties]
 ```
 
-An adaptive interview builds the profile from structured questions, conversation, example homes and property feedback (D15). The underlying goal often matters more than the literal feature: "a yard" may mean "somewhere the dog can run." The interview keeps explicit state, such as captured goals and open slots, and sends the model that state plus a few recent turns rather than the whole transcript. Voice may arrive later as another interaction adapter.
+An adaptive interview builds the signed-in person's private profile from structured questions, conversation, example homes and property feedback (D15). The underlying goal often matters more than the literal feature: "a yard" may mean "somewhere the dog can run." The interview keeps explicit state, such as captured goals and open slots, and sends the model that state plus a few recent turns rather than the whole transcript. Voice may arrive later as another interaction adapter.
 
-The profile and each search subscription evolve with feedback under the same versioning and approval rules (D16). Low-impact changes apply automatically. Material changes wait for explicit approval: hard requirements, budget, geography, a weight shift beyond a set threshold, or a major tradeoff, meaning one that involves a hard or critical preference. Budget and geography live on the subscription, so a change to either creates a subscription version, not a profile version. Every change creates a new version with evidence, and any version can be restored.
+The profile and each search subscription evolve with feedback under the same versioning and approval rules (D16). Low-impact changes apply automatically. Material changes wait for explicit approval: hard requirements, budget, geography, a single weight shift above 0.05 normalized share or cumulative learned drift above 0.10 (thresholds confirmed by the user on 2026-11-02), or a major tradeoff, meaning one that involves a hard or critical preference. Budget and geography live on the subscription, so a change to either creates a subscription version, not a profile version. Only a profile's owner approves its changes. On a shared search, any member may approve or reject a material change, and the version records who did (plan recommendation). Every change creates a new version with evidence, and any version can be restored.
 
 ```mermaid
 stateDiagram-v2
@@ -446,7 +488,7 @@ A **PropertyEvaluation** reports fit in several dimensions instead of one opaque
 | Dimension | Computed from |
 |---|---|
 | Requirements | Hard requirements: pass, unknown or fail |
-| Lifestyle fit | Weighted household preferences and travel times |
+| Lifestyle fit | Weighted preferences on the search version and travel times to search destinations |
 | Property quality | Condition, kitchen, layout and similar attributes |
 | Value | The valuation distribution against list price (D38) |
 | Investment | Underwriting outputs against the subscription's investment criteria; income strategies only, phase 8 |
@@ -456,7 +498,7 @@ A **PropertyEvaluation** reports fit in several dimensions instead of one opaque
 ```mermaid
 flowchart LR
     Facts[Resolved values with status] --> Req[Requirements check]
-    Inputs[Profile and subscription versions] --> Req
+    Inputs[Search version] --> Req
     Req -->|Pass or unknown| Dims[Lifestyle, quality and value scores]
     Req -->|Fail| Excluded[Excluded with reasons]
     Dims --> Pen[Critical mismatch penalties]
@@ -485,7 +527,7 @@ flowchart LR
     Select --> Range[Price distribution and confidence]
     Range --> Value[Value dimension]
     Range --> Scenarios[Offer scenario calculator]
-    Buyer[Tenant budget, financing and risk tolerance] --> Scenarios
+    Buyer[Search budget and financing, buyer risk tolerance] --> Scenarios
     Scenarios --> Bids[Value, competitive and win-focused bids plus walk-away]
 ```
 
@@ -493,7 +535,7 @@ The canonical valuation is a distribution, not a point (D40): a central estimate
 
 Underwriting answers a different question: how much cash remains for this buyer after operating expenses, reserves and debt payments? Record the period and source for each input. Rent due under a lease, cash collected and an agent's projected rent can differ. Label each basis and show missing inputs before presenting a total.
 
-Offer strategy is tenant-specific and sits above valuation (D41). It combines the distribution with the buyer's budget, financing, competition, risk tolerance and regret tolerance to produce a value bid, a competitive bid, a win-focused bid and a walk-away threshold. When the buyer records what happened to an offer, the system keeps the outcome for future learning. It does not assert a seller's acceptance probability without a calibrated model, and it never submits offers or negotiates.
+Offer strategy is buyer-specific and sits above valuation (D41). A scenario stays private to the account that creates it (plan recommendation). It combines the distribution with the buyer's budget, financing, competition, risk tolerance and regret tolerance to produce a value bid, a competitive bid, a win-focused bid and a walk-away threshold. When the buyer records what happened to an offer, the system keeps the outcome for future learning. It does not assert a seller's acceptance probability without a calibrated model, and it never submits offers or negotiates.
 
 #### Orchestration and partial results
 
@@ -557,7 +599,7 @@ flowchart LR
 
 AWS starts with API Gateway and Lambda for FastAPI (D27), Cognito for identity (D28), S3 for evidence, and RDS Postgres with bounded connection pools. The MCP adapter runs as its own Lambda behind the same API Gateway at `/mcp`; dogfood runs it as a separate container behind the same TLS proxy. Fargate handles browser sessions and tasks whose measured runtime or memory exceeds the Lambda budget. CDK in TypeScript defines AWS infrastructure (D20); DigitalOcean uses a documented container deployment manifest rather than an invented claim that AWS CDK deploys it.
 
-Users authenticate with Cognito authorization code flow and PKCE in dogfood and AWS. We recommend deploying only the Cognito identity stack to a real AWS account in phase 0, so dogfood signs in through Cognito long before the phase 9 AWS release. Local development can use a signed fixture issuer behind an explicit development flag. Engineers validate issuer, audience, token use, expiry, and tenant membership in both adapters. Service tasks use scoped workload credentials rather than a user's browser token.
+Users authenticate with Cognito authorization code flow and PKCE in dogfood and AWS. We recommend deploying only the Cognito identity stack to a real AWS account in phase 0, so dogfood signs in through Cognito long before the phase 9 AWS release. Local development can use a signed fixture issuer behind an explicit development flag. Engineers validate issuer, audience, token use and expiry in both adapters, resolve the token to the user's account, and check active search membership on every search-scoped request. People sign up through the Cognito hosted UI with a verified email address; the first authenticated request creates the user's account (A1). Service tasks use scoped workload credentials rather than a user's browser token.
 
 ```mermaid
 sequenceDiagram
@@ -571,12 +613,12 @@ sequenceDiagram
     Cognito-->>Web: Tokens
     Web->>API: Request with access token
     API->>API: Validate token and membership
-    API->>DB: Transaction with tenant scope
+    API->>DB: Transaction with account and search scope
     DB-->>API: Authorized rows
     API-->>Web: Result
 ```
 
-Engineers use database row-level security as defense in depth, alongside application authorization. Runtime roles neither own tables nor bypass row security. Pool users set tenant context per transaction and clear it at transaction end. Shared, rights-cleared intelligence uses explicit authorization paths rather than a null-tenant shortcut [R5].
+Engineers use database row-level security as defense in depth, alongside application authorization. Runtime roles neither own tables nor bypass row security. Pool users set account (tenant) and user context per transaction and clear it at transaction end. A search-scoped row is visible only through the user's active membership in that search. Shared, rights-cleared intelligence uses explicit authorization paths rather than a null-tenant shortcut [R5].
 
 Application code asks for logical secrets and configuration by name (D49). AWS resolves them from Secrets Manager and Parameter Store, with GitHub OIDC for deployments; dogfood injects them at deployment. Browser session state counts as a credential. Secrets never enter prompts, logs, fixtures, evidence or analysis records.
 
@@ -592,11 +634,11 @@ flowchart LR
     Status --> Ops[Operations screen]
 ```
 
-Notifications use a pluggable `NotificationStrategy`; V1 ships email and in-app strategies, and SMS, Slack, push or webhooks can follow (D51). Every notification deep-links to the property page, which holds the full record (D10). Users choose channels; each subscription's notification policy sets thresholds, digests and cooldowns that prevent repeated alerts for the same result version. External mail delivery can remain ambiguous after a timeout, so the dispatcher uses provider idempotency where available and records uncertain sends for reconciliation.
+Notifications use a pluggable `NotificationStrategy`; V1 ships email and in-app strategies, and SMS, Slack, push or webhooks can follow (D51). Every notification deep-links to the property page, which holds the full record (D10). Users choose channels. Every current member of a search receives its alerts through their own channel settings, and a removed member receives none. Each subscription's notification policy sets thresholds, digests and cooldowns that prevent repeated alerts for the same result version. External mail delivery can remain ambiguous after a timeout, so the dispatcher uses provider idempotency where available and records uncertain sends for reconciliation.
 
 The property page holds seven sections: Summary, Photos, Personal Fit, Property Intelligence, Deep Research, Timeline and Feedback (D10). The Investor page adds income and scenarios.
 
-Engineers attribute paid work to tenant, property, workflow, analyzer, model, provider, and shared-intelligence scope from the first paid call (D56). Cost categories cover browser compute, vision and text analysis, maps and location APIs, property-data APIs, deep research and tenant evaluation. Before a provider call, tasks reserve estimated spend in a transactional budget ledger; completion reconciles actual usage. Budgets are configured per budget tier, not inside individual analyzers. The analysis tier (`BASELINE` or `DEEP`) says which analyzers run; the budget tier (`BASELINE`, `DEEP` or `EXPERIMENT`) says whose money pays. A harness-triggered deep run is analysis tier `DEEP` charged to budget tier `EXPERIMENT`, and runs and reservations record both. Budget exhaustion defers optional enrichment while preserving intake and access to existing results. The ledger and reservations arrive with the first paid analyzer in phase 3; phase 5 adds cost views and operator budget controls.
+Engineers attribute paid work to account (tenant), search, property, workflow, analyzer, model, provider, and shared-intelligence scope from the first paid call (D56). Cost categories cover browser compute, vision and text analysis, maps and location APIs, property-data APIs, deep research and tenant evaluation. Before a provider call, tasks reserve estimated spend in a transactional budget ledger; completion reconciles actual usage. Budgets are configured per budget tier, not inside individual analyzers. Paid work started for a search charges the search owner's account; a member's manual request charges that member's account (plan recommendation). The analysis tier (`BASELINE` or `DEEP`) says which analyzers run; the budget tier (`BASELINE`, `DEEP` or `EXPERIMENT`) says whose money pays. A harness-triggered deep run is analysis tier `DEEP` charged to budget tier `EXPERIMENT`, and runs and reservations record both. Budget exhaustion defers optional enrichment while preserving intake and access to existing results. The ledger and reservations arrive with the first paid analyzer in phase 3; phase 5 adds cost views and operator budget controls.
 
 ```mermaid
 flowchart LR
@@ -623,10 +665,11 @@ flowchart LR
 - Automated offer submission, brokerage transaction management, and autonomous negotiation.
 - Nationwide source coverage or a general web crawler in the MVP.
 - A lender appraisal, guaranteed sale price, or calibrated seller acceptance prediction before supporting evaluation.
-- Per-member preference profiles inside one tenant. V1 keeps one shared active household profile (D5).
+- Household accounts with one shared login or one shared preference profile. Each person has an account and shares searches (A1).
+- Live merging of several members' private profiles into a shared search's evaluation. Members copy profile content into the search instead (plan recommendation).
 - An always-on worker fleet, a custom workflow engine, Temporal, a graphical ontology editor, a feature store, or a vector database before a demonstrated use case.
-- Billing, organizations and fine-grained RBAC beyond the `member`, `reviewer` and `operator` roles (D5).
-- A public multi-tenant SaaS launch during household dogfood. Engineers still enforce tenant isolation from the first migration.
+- Billing, organizations and fine-grained RBAC. A search has only `owner` and `member` roles, and the system roles are `reviewer` and `operator` (D5, A1).
+- A public multi-tenant SaaS launch during dogfood. Engineers still enforce tenant isolation from the first migration.
 - Replacing source licensing agreements with a technical caching policy.
 
 ### Alternatives and trade-offs
@@ -634,7 +677,8 @@ flowchart LR
 | Decision | Attractive alternative | Reason for rejection or deferral | Accepted cost |
 |---|---|---|---|
 | Two product sections on one website | Separate websites at launch | Both audiences need the same sign-in, listing evidence and calculations. Separate route groups let each audience start with its own questions. | Maintain two sets of navigation and page layouts. A later domain split can reuse the same API. |
-| One household profile plus strategy-specific subscriptions | One preference profile per search | The register fixes one shared active profile per tenant (D5); duplicating household needs per search would let them drift apart | A rental search must declare which household dimensions it ignores |
+| Individual accounts with shareable searches (A1) | One household tenant with one shared profile (original D5) | The user chose individual accounts and sharing; people in one household keep their own preferences while working on a common search | Membership checks on every search route, plus invitation and removal flows |
+| Copy profile content into a search on create or apply | Live-merge every member's private profile into the search's evaluation | Merge rules for conflicting weights would be arbitrary, a private edit would silently change a shared ranking, and private destinations would leak to other members | A copied requirement can lag its source profile until a member re-applies it; a rental search drops lifestyle requirements on copy |
 | Python modular monolith | Independent microservices | Early boundaries will change; network contracts add deployment and debugging work | Shared release cadence; enforce modules through import rules |
 | Postgres plus JSONB | Document-only store | Identity, access scope, provenance, and idempotency need transactions and constraints | Schema migrations plus JSON schema evolution |
 | Relational state plus outbox | Pure event sourcing | Every read would rebuild state from a log; auditability needs only immutable history and domain events (D25) | Four writes per state change |
@@ -658,13 +702,13 @@ flowchart LR
 
 | Phase | Outcome and scope boundary | Exit evidence |
 |---|---|---|
-| 0. Foundation | Monorepo layout (D47), configuration and secrets port, auth with the Cognito identity stack deployed alone to a real AWS account, tenancy, migrations, path-aware CI, Compose, on-demand task launcher and scheduler, outbox publisher and `outbox-sweep`, failure taxonomy, telemetry baseline, MCP adapter skeleton at `/mcp`, MiniStack compatibility inventory | Two-tenant isolation checks, repeatable clean bootstrap, path-aware CI run, Cognito sign-in smoke, MCP auth contract test |
+| 0. Foundation | Monorepo layout (D47), configuration and secrets port, auth with the Cognito identity stack deployed alone to a real AWS account, one tenant per user account (A1), migrations, path-aware CI, Compose, on-demand task launcher and scheduler, outbox publisher and `outbox-sweep`, failure taxonomy, telemetry baseline, MCP adapter skeleton at `/mcp`, MiniStack compatibility inventory | Two-account isolation checks, account provisioning test, repeatable clean bootstrap, path-aware CI run, Cognito sign-in smoke, MCP auth contract test |
 | 1. MLS ingestion | Scheduled IMAP intake, raw `.eml` retention, TheMLS email parser, source observations, identity, listing history with outbox, manual add by URL or address (API), first MCP tools | Replayed email corpus creates no duplicate listing episode or observation |
 | 2. TheMLS enrichment | Browser profile lifecycle, capability-based enrichment, content-addressed media, failure classification | Captured listing with expired-session recovery and immutable evidence |
-| 3. Property intelligence | Ontology v1 in Postgres (75+ attributes), claims with D7 statuses and resolution, search subscriptions with versioned hard criteria, hard pre-filter, requirements evaluation, model router, first analyzer set, baseline and deep tiers with manual trigger, budget ledger and tier reservations, invalidation, human correction claims, value-of-information queue, evaluation harness with shadow runs | No paid analyzer call on a pre-filter reject, golden-property evaluation and evidence-linked profile |
-| 4. Preferences and evaluation | PreferenceProfile versions, preference definitions, adaptive interview, preference evolution for profiles and subscriptions, multidimensional evaluation, automatic deep-research triggers | Deterministic golden evaluations, unknown handling and trigger-rate report |
-| 5. Homebuyer dogfood | Homebuyer onboarding, feed and seven-section property page, manual add UI, shortlist, visit questions, tours with post-tour questions, corrections, email and in-app notifications, operations UI, cost views and operator budget controls, backups | One household completes the intake-to-review loop on DigitalOcean; restore drill passes |
-| 6. Location intelligence | Location subsystem with busy/quiet street attributes, first permitted location source, tenant destinations and time-of-day travel times | Field-level evaluation with measured versus inferred labels |
+| 3. Property intelligence | Ontology v1 in Postgres (75+ attributes), claims with D7 statuses and resolution, search subscriptions with versioned hard criteria, an owner membership row and membership checks on every search route, hard pre-filter, requirements evaluation, model router with OpenAI and Anthropic adapters (A2), first analyzer set, baseline and deep tiers with manual trigger, budget ledger and tier reservations, invalidation, human correction claims, value-of-information queue, evaluation harness with shadow runs | No paid analyzer call on a pre-filter reject, golden-property evaluation and evidence-linked profile, both provider adapters passing the provider contract, non-member `404` on search routes |
+| 4. Preferences and evaluation | Per-account PreferenceProfile versions, copying a profile into a search, preference definitions, adaptive interview, preference evolution for profiles and subscriptions, multidimensional evaluation, automatic deep-research triggers | Deterministic golden evaluations, unknown handling and trigger-rate report |
+| 5. Homebuyer dogfood | Homebuyer onboarding, feed and seven-section property page, manual add UI, search sharing (invite, accept, member list, removal), shortlist, visit questions, tours with post-tour questions, corrections, email and in-app notifications, operations UI, cost views and operator budget controls, backups | Two accounts sharing one search complete the intake-to-review loop on DigitalOcean; a removed member gets `404`; restore drill passes |
+| 6. Location intelligence | Location subsystem with busy/quiet street attributes, first permitted location source, profile and search destinations, time-of-day travel times | Field-level evaluation with measured versus inferred labels |
 | 7. Market intelligence | Explainable comp selection, price distributions, Value dimension, holdout evaluation | Backtest report and calibrated interval checks or explicit abstention |
 | 8. Investor experience and offer strategy | Investor onboarding and feed, rent-roll intake, unit-level occupancy, operating expenses, financing, cash flow, Investment dimension and `scoring_v3` ranking, offer bids and walk-away threshold, offer outcomes. Expose the live-in scenario in Homebuyer too. | One duplex evaluated under both strategies, Investor feed ordered by `scoring_v3`, plus reproducible scenarios and isolation tests |
 | 9. AWS release hardening | CDK deployment, Step Functions/Fargate compatibility, AWS-side shadow runs, operational drills | AWS staging smoke, fault injection, budget alarms, restore and rollback reports |
@@ -680,19 +724,26 @@ V1 is phases 0–8 running on DigitalOcean dogfood, including evaluation and sha
 | Mail host and authentication method unknown | IMAP port with provider configuration; prefer OAuth where supported | User before live mailbox setup |
 | TheMLS MFA, session lifetime, and source-ID reuse unknown | Credential leases, `AUTH_REQUIRED`, fixture research, explicit episode policy | Connector engineer in phase 2 |
 | MiniStack service fidelity and CDK bootstrap compatibility | Pin digest; record actual API tests and unsupported operations | Infrastructure engineer in phase 0 and AWS gate |
-| Initial ontology attributes and preference weights unconfirmed | Seed the proposed 75+ attributes; require household review of the first preference version | User in phase 4 |
+| Initial ontology attributes and preference weights unconfirmed | Seed the proposed 75+ attributes; require each dogfood user's review of their first preference version | User in phase 4 |
 | Licensed evidence may prohibit cross-tenant reuse or long retention | Entitlement-aware storage and retention classes | Source owner before sharing or locking evidence |
 | No valuation corpus or calibration target supplied | Baseline and holdout design; abstain until release gate passes | Model owner in phase 7 |
 | No public-record provider chosen for `ASSESSOR`, `PERMITS`, `ZONING`, `TAX_HISTORY` | Deep tier runs without those capabilities and marks them `UNKNOWN` until a permitted provider exists | User before the provider enters a phase |
 | AI budget per tier and useful latency target unconfirmed | Configurable conservative limits; measure pilot distribution | User and operator before the first paid analyzer run in phase 3 |
 | Recovery targets may exceed single-host dogfood capability | Independent backups and timed restore drill | Operator before phase 5 release |
-| OpenAI as default first AI provider: D31 requires a multi-provider abstraction with one or two initial implementations but names no vendor, and no benchmark favors one | Recommend OpenAI behind the provider-independent contract; Anthropic is the alternative first adapter | User, before confirmation |
-| Which MCP clients must connect, and whether they support remote streamable HTTP with OAuth | Recommend streamable HTTP at `/mcp` with Cognito authorization code and PKCE and a pre-registered client ID, whether or not Cognito supports dynamic client registration (Research still required); a local stdio server is the alternative | User, before confirmation |
-| D5 fixes one household profile per tenant; the later Homebuyer/Investor split needs strategy-specific criteria | Recommend one active PreferenceProfile plus per-subscription strategy criteria; `rental_hold` subscriptions skip the Lifestyle fit dimension and profile hard requirements whose preference definition has category `household_lifestyle` | User, before confirmation |
 | Investor ranking: the ATL promises ranking by investment criteria, but no register decision fixes the metrics or weights | Recommend an Investment dimension over `underwriting.cash_flow`, `underwriting.cap_rate` and `underwriting.dscr`, and `scoring_v3` weights (BTL evaluation requirement) | User, before phase 8 |
-| Interview-proposed budget or geography for a tenant with no matching subscription | Recommend a `SUBSCRIPTION` proposal with no target whose approval creates the subscription | User, before phase 4 |
-| D16 names material change types but no thresholds | Recommend: a single learned weight change above 0.05 normalized share, or cumulative learned drift above 0.10 since the last explicit approval, counts as material (BTL Preferences requirement) | User, before confirmation |
-| D22 asks for 15–30 s polling; schedulers fire at most once a minute, and EventBridge Scheduler only promises 60-second precision [R9], so an occasional gap between polls can exceed 30 s | Recommend one invocation per minute that polls every 20 s for 45 s, instead of an always-on poller (D26); dogfood reports the measured poll-gap distribution. If a strict 30 s ceiling matters, the alternatives are overlapping invocations or a push ingress (IMAP IDLE or webhook) behind `EmailIngress` | User, before confirmation |
+| Interview-proposed budget or geography for a user with no matching search | Recommend a `SUBSCRIPTION` proposal with no target whose approval creates the subscription | User, before phase 4 |
+| Cognito support for OAuth dynamic client registration unknown | MCP uses one pre-registered public client ID, which any client implementing the MCP authorization specification can use when it accepts a configured client ID; a client that only supports dynamic registration cannot connect until this research closes. Cognito also accepts only allowlisted callback URLs, so a client with a new redirect URI needs an allowlist entry on the shared client (configuration, no code) | Infrastructure engineer in phase 0 |
+
+Resolved by the user on 2026-11-02 (recorded in the register as A1–A3 where they change a decision):
+
+- Households: each person has an account and shares searches (A1), replacing D5's one shared household profile. The copy rule, owner and member rights, and per-member destinations above are plan recommendations derived from that answer.
+- D16 materiality thresholds: 0.05 normalized share per learned weight change and 0.10 cumulative learned drift, kept.
+- D22 cadence: one `imap-poll` invocation per minute polling every 20 s for 45 s, accepted with occasional gaps above 30 s between polls.
+- AI provider: OpenAI and Anthropic adapters both ship in phase 3 (A2).
+- MCP clients: no client list; any client implementing the MCP authorization specification connects (A3).
+- Task specs live under `/specs/property-focus/tasks/`.
+
+Open:
 
 - [ ] Confirm the Investor launch size range before sourcing evaluation data. One to four units is the proposed starting boundary. Five-plus-unit support remains undecided.
 - [ ] Confirm the first mailbox provider and authorized TheMLS workflow.
@@ -713,7 +764,7 @@ All paths below are repository-relative and designate files to create. There are
 
 ```text
 /specs/property-focus/master-plan.md                 This document
-/specs/property-focus/architecture-decisions.md       Canonical user decision register (D1–D56)
+/specs/property-focus/architecture-decisions.md       Canonical user decision register (D1–D56, amendments A1–A3)
 /specs/property-focus/source-rights.md                Rights, retention and entitlement decisions
 /specs/property-focus/evaluation-policy.md            Dataset splits, metrics, release thresholds
 /docs/compatibility.md                              MiniStack versus AWS operation matrix
@@ -740,7 +791,7 @@ All paths below are repository-relative and designate files to create. There are
 /backend/pyproject.toml                             property-focus distribution, property_focus package, CLI entrypoint
 /backend/alembic.ini                                Migration configuration
 /backend/migrations/env.py                          Alembic metadata and settings
-/backend/migrations/versions/0001_foundation.py     Illustrative name: phase 0 tenants, users, memberships, workflow, idempotency, outbox and audit tables
+/backend/migrations/versions/0001_foundation.py     Illustrative name: phase 0 tenants (one per user account), users, user roles, workflow, idempotency, outbox and audit tables
 /backend/migrations/versions/<NNNN>_<task>.py       Illustrative pattern: one appended migration per phase task, creating only that task's tables; never rewrite a released migration
 /backend/src/property_focus/__init__.py              Package marker
 /backend/src/property_focus/config.py                Typed settings, environment validation, budget-tier limits
@@ -751,7 +802,7 @@ All paths below are repository-relative and designate files to create. There are
 /backend/src/property_focus/domain/ontology.py       Ontology validation, lifecycle and version compatibility
 /backend/src/property_focus/domain/invalidation.py   Invalidation records and EVENT/LAZY/BATCH/MANUAL modes
 /backend/src/property_focus/domain/funnel.py         Versioned hard pre-filter stage and effective hard-requirement set (phase 3)
-/backend/src/property_focus/domain/subscriptions.py  Subscription versions, criteria validation and subscription materiality rules (phase 3)
+/backend/src/property_focus/domain/subscriptions.py  Subscription versions, criteria validation, subscription materiality rules (phase 3); profile-copy rule by strategy (phase 4); owner/member rights (phase 3, invitations phase 5)
 /backend/src/property_focus/domain/triggers.py       Deep-research trigger strategy and anomaly rules
 /backend/src/property_focus/domain/verification.py   Value-of-information priority
 /backend/src/property_focus/domain/preferences.py    Profile versions, preference definitions, materiality classifier
@@ -762,14 +813,14 @@ All paths below are repository-relative and designate files to create. There are
 /backend/src/property_focus/domain/underwriting.py   Unit income, cash flow and expense normalization
 /backend/src/property_focus/domain/errors.py         Failure classes, stable codes and the requires_reconciliation flag
 /backend/src/property_focus/application/ports.py     Repository, storage, model, source, enricher, launcher, secret and notification protocols
-/backend/src/property_focus/application/context.py   Authenticated principal, tenant and entitlement
+/backend/src/property_focus/application/context.py   Authenticated user, account tenant, per-request search membership check and entitlement
 /backend/src/property_focus/application/ingestion.py Intake, manual add, document upload and identity use cases
 /backend/src/property_focus/application/enrichment.py Capability registry and enricher selection (primary/secondary/shadow)
 /backend/src/property_focus/application/intelligence.py Analysis tiers, profiles, corrections and verification use cases
-/backend/src/property_focus/application/subscriptions.py Subscription create, version, revert and pre-filter re-run use cases (phase 3)
+/backend/src/property_focus/application/subscriptions.py Subscription create (owner row), version, revert and pre-filter re-run use cases (phase 3); apply-profile copy (phase 4); invite, accept, list members and remove (phase 5)
 /backend/src/property_focus/application/preferences.py Profile, interview and proposal use cases for profile and subscription targets (phase 4)
 /backend/src/property_focus/application/evaluation.py Evaluation, feed and deep-trigger use cases
-/backend/src/property_focus/application/location.py  Location profiles and tenant travel times
+/backend/src/property_focus/application/location.py  Location profiles and travel times for profile and search destinations
 /backend/src/property_focus/application/finance.py   Valuation, offer and outcome use cases
 /backend/src/property_focus/application/workflows.py Workflow runs, leases, idempotency, OutboxPublisher (post-commit launch and sweep) and state transitions
 /backend/src/property_focus/application/notifications.py Notification selection, strategies and deduplication
@@ -778,7 +829,7 @@ All paths below are repository-relative and designate files to create. There are
 /backend/src/property_focus/adapters/rest/schemas.py Pydantic API request/response schemas
 /backend/src/property_focus/adapters/rest/routes.py  API endpoint bindings
 /backend/src/property_focus/adapters/mcp/server.py   Streamable HTTP transport at /mcp (phase 0 skeleton) and tool bindings added in each tool's phase
-/backend/src/property_focus/adapters/auth/cognito.py Token and membership checks for REST and MCP; MCP protected-resource metadata
+/backend/src/property_focus/adapters/auth/cognito.py Token checks and account resolution (first request provisions the account) for REST and MCP; MCP protected-resource metadata
 /backend/src/property_focus/adapters/db/models.py    SQLAlchemy models and constraints
 /backend/src/property_focus/adapters/db/repositories.py Scoped repositories and unit of work
 /backend/src/property_focus/adapters/db/rls.sql      Row security definitions installed by migrations
@@ -792,8 +843,8 @@ All paths below are repository-relative and designate files to create. There are
 /backend/src/property_focus/adapters/sources/market.py First licensed comparable-sales source (phase 7)
 /backend/src/property_focus/adapters/ai/base.py      ModelProvider contract and response validation
 /backend/src/property_focus/adapters/ai/router.py    ModelRouter: capability and policy to provider/model
-/backend/src/property_focus/adapters/ai/openai.py    First provider adapter; recommended default pending user confirmation (Risks)
-/backend/src/property_focus/adapters/ai/anthropic.py Second adapter; passes the shared capability contract by the AWS ready gate (phase 9), earlier if needed
+/backend/src/property_focus/adapters/ai/openai.py    OpenAI ModelProvider adapter; ships in phase 3 and passes the shared provider contract (A2)
+/backend/src/property_focus/adapters/ai/anthropic.py Anthropic ModelProvider adapter; ships in phase 3 and passes the shared provider contract (A2)
 /backend/src/property_focus/adapters/notifications/email.py EmailNotificationStrategy and delivery reconciliation
 /backend/src/property_focus/adapters/notifications/in_app.py InAppNotificationStrategy
 /backend/src/property_focus/adapters/telemetry.py    OTel setup, trace propagation and redaction
@@ -838,12 +889,12 @@ All paths below are repository-relative and designate files to create. There are
 /backend/tests/unit/test_evaluation.py              Requirements, dimensions, penalties, coverage and reproducibility
 /backend/tests/unit/test_finance.py                 Comp selection, quantiles, value score, leakage and bid arithmetic
 /backend/tests/unit/test_underwriting.py            Duplex, vacancy basis, missing values and debt service
-/backend/tests/unit/test_ai.py                      Schema validation, router, fallback and accounting
+/backend/tests/unit/test_ai.py                      Schema validation, router configuration, fallback, accounting and the shared provider contract run against both adapters
 /backend/tests/unit/test_failures.py                Code-to-class mapping, retry policy and reconciliation-only codes
 /backend/tests/unit/test_notifications.py           Strategy protocol, fake-strategy registration and dedupe keys
 /backend/tests/unit/test_runtime_manifests.py       Parses compose files and scheduler.crontab; fails on a long-running worker command
 /backend/tests/integration/test_ingestion.py        MIME, IMAP checkpoints, scheduled poll overlap and evidence writes
-/backend/tests/integration/test_tenancy.py          RLS, signed evidence URLs and adapter parity
+/backend/tests/integration/test_tenancy.py          Account isolation, search membership (non-member and removed-member 404s), author-only feedback, RLS, signed evidence URLs and adapter parity
 /backend/tests/integration/test_workflows.py        Retries, leases, outbox, launcher and budget races
 /backend/tests/integration/test_browser.py          Recorded browser pages and auth expiry
 /backend/tests/integration/test_telemetry.py        End-to-end trace linkage and log redaction
@@ -868,7 +919,7 @@ All paths below are repository-relative and designate files to create. There are
 /frontend/src/api/baseApi.ts                        Auth headers, errors and cache tags
 /frontend/src/api/generated.ts                      Generated endpoints and types
 /frontend/src/products/homebuyer/Layout.tsx         Homebuyer navigation and route group
-/frontend/src/products/homebuyer/Onboarding.tsx     Interview, household requirements and subscription creation
+/frontend/src/products/homebuyer/Onboarding.tsx     Interview, requirements and search creation with optional profile copy
 /frontend/src/products/homebuyer/HomeFeed.tsx       Homebuyer feed under /homebuyer: requirements group, overall fit, unknowns
 /frontend/src/products/homebuyer/PropertyDetail.tsx Homebuyer property page: seven D10 sections, shortlist, visit questions, tours
 /frontend/src/products/investor/Layout.tsx          Investor navigation and route group (phase 8)
@@ -876,12 +927,13 @@ All paths below are repository-relative and designate files to create. There are
 /frontend/src/products/investor/AcquisitionFeed.tsx Investment criteria and incomplete estimates
 /frontend/src/products/investor/PropertyDetail.tsx  Shared D10 sections plus rent roll, expense evidence and scenario comparison
 /frontend/src/pages/AddProperty.tsx                 Manual add by URL or address
-/frontend/src/pages/Preferences.tsx                 Profile and subscription versions, proposals, approvals, revert (phase 5); destinations section (phase 6)
+/frontend/src/pages/Preferences.tsx                 Profile and subscription versions, proposals, approvals, revert, apply profile to a search (phase 5); profile and search destinations (phase 6)
+/frontend/src/pages/SearchMembers.tsx               Search members, pending invitations, invite, leave and remove (phase 5)
 /frontend/src/pages/Verification.tsx                VOI-ordered review queue and corrections
 /frontend/src/pages/Notifications.tsx               In-app inbox and channel settings
 /frontend/src/pages/Operations.tsx                  Role-gated failed work, credential state, costs and retry controls
 /frontend/src/pages/Valuation.tsx                   Distribution and comparable explanations
-/frontend/src/pages/OfferScenarios.tsx              Tenant scenario inputs, bids and outcomes
+/frontend/src/pages/OfferScenarios.tsx              Private scenario inputs, bids and outcomes
 /frontend/src/components/FitDimensions.tsx          Multidimensional fit with coverage and critical mismatches
 /frontend/src/components/InterviewPanel.tsx         Adaptive interview turns and proposal confirmation
 /frontend/src/components/DeepResearchPanel.tsx      Tier status, trigger reasons and deep findings
@@ -893,6 +945,7 @@ All paths below are repository-relative and designate files to create. There are
 /frontend/tests/operations.test.tsx                 Replay confirmation and role controls
 /frontend/e2e/dogfood.spec.ts                       Sign-in, feed, evidence, preference, shortlist and feedback loop
 /frontend/e2e/products.spec.ts                      Same-account subscriptions and duplex strategy switch
+/frontend/e2e/sharing.spec.ts                       Two accounts: invite, accept, shared shortlist and visit question, author-only notes, removal
 /frontend/e2e/accessibility.spec.ts                 axe scan and keyboard-only path for feed, dialogs and verification
 /ontology/schema/attribute.schema.json              JSON Schema for seed attribute definitions
 /ontology/v1.0.0/attributes.json                    Seed for ACTIVE v1: 75+ attributes across the D32 categories
@@ -906,7 +959,7 @@ All paths below are repository-relative and designate files to create. There are
 /infrastructure/cdk/cdk.json                        CDK app configuration
 /infrastructure/cdk/bin/property-focus.ts           App and environment selection
 /infrastructure/cdk/lib/data-stack.ts               RDS, S3, KMS and backup configuration
-/infrastructure/cdk/lib/identity-stack.ts           Cognito user pool, web application client and public MCP client (PKCE); deployable alone from phase 0
+/infrastructure/cdk/lib/identity-stack.ts           Cognito user pool (self sign-up with verified email), web application client and one public MCP client (PKCE) shared by all MCP clients; deployable alone from phase 0
 /infrastructure/cdk/lib/api-stack.ts                API Gateway, REST and MCP (/mcp) Lambdas and permissions
 /infrastructure/cdk/lib/workflow-stack.ts           Step Functions, task Lambdas, queues, EventBridge Scheduler schedules targeting task Lambdas (imap-poll and outbox-sweep each minute, repair every 5 minutes, invalidation-batch hourly) and Fargate browser task
 /infrastructure/cdk/lib/observability-stack.ts      Dashboards, alarms and budget notifications
@@ -931,7 +984,7 @@ All paths below are repository-relative and designate files to create. There are
 
 Files to modify: none at project start. Migration file names above are illustrative: add one appended migration per phase task and never rewrite a released migration. Task specs MUST enumerate additional exact files before creating them.
 
-Off-limits: credentials, browser profile and session state, unredacted private email, licensed source corpora, production database contents, and another tenant's private records. Do not commit these to the repository or to `/fixtures`. Do not edit `/frontend/src/api/generated.ts` by hand. Do not introduce `/.pvpd/` paths.
+Off-limits: credentials, browser profile and session state, unredacted private email, licensed source corpora, production database contents, and another account's private records. Do not commit these to the repository or to `/fixtures`. Do not edit `/frontend/src/api/generated.ts` by hand. Do not introduce `/.pvpd/` paths.
 
 ### Data model and invariants
 
@@ -939,7 +992,7 @@ Use UUID primary keys, UTC `timestamptz`, integer monetary minor units with ISO 
 
 | Table | Required fields and constraints |
 |---|---|
-| `tenants`, `users`, `memberships` | Membership unique on tenant/user; roles `member`, `reviewer`, `operator`; user identity bound to issuer/sub, independent of Cognito internals (D28) |
+| `tenants`, `users`, `user_roles` | Each user owns exactly one tenant, created with the user on the first authenticated request (unique `tenants.owner_user_id`; A1); user identity bound to issuer/sub, independent of Cognito internals (D28); verified email copied from the token for invitation matching; `user_roles` holds only the system roles `reviewer` and `operator` |
 | `source_accounts` | Tenant, provider, credential secret reference, entitlement group, browser session state (`HEALTHY`, `SESSION_EXPIRING`, `AUTH_REQUIRED`, `BLOCKED`); secret values absent |
 | `ingest_messages` | Account, mailbox, UIDVALIDITY, UID, raw evidence asset ID, digest, parse version, state; unique account/mailbox/UIDVALIDITY/UID |
 | `properties`, `property_aliases` | Stable ID, normalized address components, unit, country, coordinates, provisional state, identity confidence; parcel anchors scoped by jurisdiction; alias and merge audit |
@@ -951,37 +1004,39 @@ Use UUID primary keys, UTC `timestamptz`, integer monetary minor units with ISO 
 | `evidence_asset_refs` | Evidence asset, property ID, listing ID, source observation ID; property/listing references separated from object bytes |
 | `ontology_versions` | Semantic version, state `DRAFT`/`ACTIVE`/`RETIRED`, digest, published_at, published_by; partial unique index allows one `ACTIVE`; non-`DRAFT` rows and their attributes immutable (D33) |
 | `ontology_attributes` | Ontology version FK, key, category, subject type, value type, unit (nullable for unitless), allowed values, resolution rule name, scalar rule parameters, default invalidation mode, description; unique version/key; rule name must exist in `resolution_rules.py` |
-| `preference_definitions` | Ontology version FK, key, category (`property`, `household_lifestyle`; plan recommendation, used by the effective hard-requirement set), lifestyle goals, satisfying attribute keys (FK to same-version attributes), utility function name from code registry, scalar parameters; unique version/key (D34) |
+| `preference_definitions` | Ontology version FK, key, category (`property`, `household_lifestyle`; plan recommendation, used by the profile-copy rule for `rental_hold` searches), lifestyle goals, satisfying attribute keys (FK to same-version attributes), utility function name from code registry, scalar parameters; unique version/key (D34) |
 | `claims`, `claim_evidence` | Property/unit/listing/location/market subject, attribute key, typed JSONB value, ontology version, provider, source type (`SOURCE`, `ANALYZER`, `HUMAN`, `PROVIDER`), observed time, confidence method/value, analysis run ID or author principal, scope; immutable. Evidence join carries locator kind (`ASSET`, `IMAGE_REGION`, `FLOORPLAN_REGION`, `TEXT_SPAN`, `RECORD`, `PROVIDER_RESPONSE`) and locator JSON (D12, D35) |
-| `verification_requests` | Target attribute/claim, VOI score and inputs, state, asked_at, answered claim ID; tenant-scoped when tied to a preference |
+| `verification_requests` | Target attribute/claim, VOI score and inputs, state, asked_at, answered claim ID; scoped to the asking account when tied to a preference |
 | `analysis_runs` | Kind (analyzer/enricher/valuation/explanation), name, analysis tier (`BASELINE`/`DEEP`), budget tier (`BASELINE`/`DEEP`/`EXPERIMENT`), mode (`PUBLISHED`/`SHADOW`), provider, model, model version, prompt version, analyzer version, ontology version, computation key (unique), input evidence IDs, status (`COMPLETE`, `PARTIAL`, `FAILED`), confidence, tokens, cost, latency, result JSONB, workflow run ID; never updated after completion (D8, D14, D31) |
 | `intelligence_profiles` | Subject, immutable revision, ontology/resolver versions, resolved values with status, claim IDs, component status, completeness, input digest, scope |
 | `invalidations` | Subject, capability or attribute, cause (`SOURCE_CHANGE`, `ONTOLOGY_VERSION`, `ANALYZER_VERSION`, `HUMAN_CLAIM`, `TTL`), mode (`EVENT`, `LAZY`, `BATCH`, `MANUAL`), invalidated_at, resolved_by analysis run ID (D13) |
 | `analysis_triggers` | Property, analysis tier, budget tier, type (`AUTO`, `MANUAL`, `EXPERIMENT`), strategy name and version, reasons JSONB, requesting principal or search subscription, workflow run ID, created_at (D6) |
-| `preference_profiles`, `preference_versions` | Tenant; one `ACTIVE` profile per tenant (partial unique index, D5); versions append-only with ontology version, lifestyle goals, preferences (definition key, importance `critical`/`high`/`medium`/`low`, hard flag, acceptable alternatives), tradeoffs, examples, destinations (phase 6), dimension weights, unknown policy, origin (`EXPLICIT`, `LEARNED`, `INTERVIEW`, `REVERT`), evidence refs, digest |
-| `preference_proposals` | Tenant, target kind (`PROFILE`, `SUBSCRIPTION`), target ID (profile ID or search subscription ID; null only for a `SUBSCRIPTION` proposal that creates a subscription), base version (a `preference_versions` or `search_subscription_versions` row matching the target kind; check constraint), origin (`LEARNED`, `INTERVIEW`), diff, materiality (`LOW_IMPACT`, `MATERIAL`) with reasons, evidence feedback IDs, state (`PROPOSED`, `AUTO_APPLIED`, `AWAITING_APPROVAL`, `APPLIED`, `REJECTED`, `REVERTED`), resulting version, decided_by |
+| `preference_profiles`, `preference_versions` | Tenant (the owning account); one `ACTIVE` profile per account (partial unique index on `tenant_id`, A1); private RLS; versions append-only with ontology version, lifestyle goals, preferences (definition key, importance `critical`/`high`/`medium`/`low`, hard flag, acceptable alternatives), tradeoffs, examples, profile destinations (phase 6; private), dimension weights, unknown policy, origin (`EXPLICIT`, `LEARNED`, `INTERVIEW`, `REVERT`), evidence refs, digest |
+| `preference_proposals` | Proposing account (tenant), target kind (`PROFILE`, `SUBSCRIPTION`), target ID (profile ID or search subscription ID; null only for a `SUBSCRIPTION` proposal that creates a subscription), base version (a `preference_versions` or `search_subscription_versions` row matching the target kind; check constraint), origin (`LEARNED`, `INTERVIEW`), diff, materiality (`LOW_IMPACT`, `MATERIAL`) with reasons, evidence feedback IDs, state (`PROPOSED`, `AUTO_APPLIED`, `AWAITING_APPROVAL`, `APPLIED`, `REJECTED`, `REVERTED`), resulting version, decided_by user; RLS: `PROFILE` proposals visible to the profile owner only, `SUBSCRIPTION` proposals to the search's members |
 | `interview_sessions` | Tenant, profile, state JSONB (captured goals, filled and open slots, pending examples, step), recent turns (last 6), status; private RLS (D15) |
-| `search_subscriptions`, `search_subscription_versions` | Tenant, name, experience; versions append-only and immutable with base version, source, geography and listing criteria, notification policy, strategy (`owner_occupancy`, `live_in_and_rent`, `rental_hold`), strategy criteria (hard, and soft investment criteria each with metric, floor, target and weight), dimension weights (optional), budget, financing assumptions, origin (`EXPLICIT`, `LEARNED`, `INTERVIEW`, `REVERT`), evidence refs, created_by, digest (D16, D17) |
-| `shortlist_entries` | Tenant, search subscription and property FKs, saved by and saved at. Unique per subscription/property; private RLS. |
-| `property_evaluations` | Tenant, search subscription ID, property ID, intelligence profile revision, preference version (null before phase 4), subscription version, ontology version, scoring version, underwriting version and digest (null for `owner_occupancy`), valuation ID (nullable), requirements status and per-criterion results, dimension scores and coverage (including `investment` from phase 8), critical mismatches, overall score, explanation reference, input digest; unique on input digest; private RLS (D9) |
+| `search_subscriptions`, `search_subscription_versions` | Owner user, name, experience; search-scoped RLS; versions append-only and immutable with base version, source, geography and listing criteria, notification policy, strategy (`owner_occupancy`, `live_in_and_rent`, `rental_hold`), strategy criteria (hard, and soft investment criteria each with metric, floor, target and weight), dimension weights (optional), copied preferences (hard requirements, soft preferences, dimension weights) with source profile version and applying user, search destinations (phase 6), budget, financing assumptions, origin (`EXPLICIT`, `LEARNED`, `INTERVIEW`, `REVERT`, `PROFILE_COPY`), evidence refs, created_by, digest (D16, D17, A1) |
+| `search_members` | Search subscription FK, user FK, role (`owner`, `member`), added_by, added_at, removed_by, removed_at; partial unique indexes allow one active row per search/user and one active `owner` per search; creating a search inserts its owner row in the same transaction; removal sets `removed_at` and never deletes the row (A1) |
+| `search_invitations` | Search subscription FK, invited email (lowercased), SHA-256 of the single-use token (raw token never stored), invited_by, expires_at (7 days; plan recommendation), state (`PENDING`, `ACCEPTED`, `EXPIRED`), accepted_by, accepted_at; partial unique index allows one `PENDING` row per search/email |
+| `shortlist_entries` | Search subscription and property FKs, saved_by user, saved_at. Unique per subscription/property; search-scoped RLS, so every member sees every entry. |
+| `property_evaluations` | Search subscription ID, property ID, intelligence profile revision, subscription version (which carries any copied preferences), ontology version, scoring version, underwriting version and digest (null for `owner_occupancy`), valuation ID (nullable), requirements status and per-criterion results, dimension scores and coverage (including `investment` from phase 8), critical mismatches, overall score, explanation reference, input digest; unique on input digest; search-scoped RLS (D9, A1) |
 | `location_profiles` | Property, ontology version, location and traffic attribute claims, freshness, provenance (D42) |
-| `travel_time_results` | Tenant, property, destination digest, time window, mode, minutes, provider, computed_at; private RLS (D43) |
+| `travel_time_results` | Exactly one of owning tenant (profile destination) or search subscription (search destination), enforced by a check constraint; property, destination digest, time window, mode, minutes, provider, computed_at; RLS private to the account or scoped to the search (D43, A1) |
 | `market_profiles`, `comparable_sales` | Geography/class/time scope, sale date/price, rights, provenance; dedupe source sale ID; exclude future information from historical runs |
 | `valuations` | Property/profile, comp selector and model versions, as-of, currency, quantiles, central estimate, confidence, selected comps with similarity features, weights and reasons, list-price comparison, status (D39, D40) |
-| `offer_scenarios` | Tenant, search subscription ID, preference and subscription versions, strategy, selected owner unit if applicable, unit input revisions, valuation ID, financial assumptions, value/competitive/win-focused bids, walk-away threshold, binding constraints, version; private RLS |
+| `offer_scenarios` | Creating account (tenant), search subscription ID, subscription version, strategy, selected owner unit if applicable, unit input revisions, valuation ID, financial assumptions, value/competitive/win-focused bids, walk-away threshold, binding constraints, version; private RLS |
 | `offer_outcomes` | Tenant, offer scenario, offered amount, result (`WON`, `LOST`, `WITHDRAWN`, `UNKNOWN`), final sale price if known, recorded_at; private RLS (D41) |
 | `workflow_runs`, `workflow_steps`, `step_attempts` | Tenant/scope, kind, analysis tier and budget tier (null for non-analysis work), input digest, state (`QUEUED`, `RUNNING`, `COMPLETE`, `PARTIAL`, `WAITING_FOR_USER`, `FAILED`, `CANCELLED`), lease expiry, fencing token, failure class and code, parent, timestamps, result references |
 | `idempotency_records` | Scope, operation, key, request digest, state, result ID, lease; unique scope/operation/key |
 | `domain_events`, `outbox_events`, `processed_events` | Event ID/version, aggregate revision, payload reference, publish state; consumer/event unique |
-| `notifications`, `notification_deliveries` | Tenant/user, event, result revision, strategy (`EMAIL`, `IN_APP`), property deep link, dedupe key, provider ID, state; strategy dedupe unique |
+| `notifications`, `notification_deliveries` | Recipient user and tenant, search subscription (nullable), event, result revision, strategy (`EMAIL`, `IN_APP`), property deep link, dedupe key, provider ID, state; strategy dedupe unique |
 | `budget_reservations`, `usage_events` | Tenant/shared owner, property, workflow run, analysis run, analysis tier (null for non-analyzer spend), budget tier, cost category, analyzer, provider/model, estimate/actual, currency, tokens, duration, state; unique provider operation reference where available |
-| `feedback` | Tenant, search subscription ID, property ID, principal, target revision, `kind` (`note`, `visit_question`, `like`, `dislike`), text, time; private RLS; `visit_question` requires non-empty text; feedback does not mutate source evidence |
-| `tours` | Tenant, property, search subscription, visited_at, principal; private RLS |
-| `audit_events` | Tenant, principal, target revision, action, redacted metadata, time |
+| `feedback` | Author account (tenant) and user, search subscription ID, property ID, target revision, `kind` (`note`, `visit_question`, `like`, `dislike`), text, time; RLS shows `visit_question` rows to the search's members and `note`, `like` and `dislike` rows to their author only; `visit_question` requires non-empty text; feedback does not mutate source evidence |
+| `tours` | Search subscription, property, visited_at, recorded_by user; search-scoped RLS (plan recommendation) |
+| `audit_events` | Account, principal, search subscription (nullable), target revision, action, redacted metadata, time |
 
 Use indexes on scoped external IDs, subject/attribute/observation time, tenant/workflow state/created time, outbox pending time, profile input digest and computation key. Add GIN JSONB indexes only for measured query patterns. Store polygons and spatial queries with PostGIS only if the first location source requires them; record the extension in migrations and compatibility tests.
 
-Tenant-private tables MUST have `tenant_id NOT NULL`, scoped foreign keys where appropriate, and forced RLS. Evidence shared through an entitlement group MUST require an explicit membership join. Database maintenance roles and backup roles require a documented separation from runtime roles.
+The isolation boundary is the user account (A1). Account-private tables MUST have `tenant_id NOT NULL`, scoped foreign keys where appropriate, and forced RLS. Search-scoped tables (`search_subscriptions`, `search_subscription_versions`, `search_members`, `search_invitations`, `property_evaluations`, `shortlist_entries`, `tours`, search-owned `travel_time_results`, and the `visit_question` rows of `feedback`) MUST be keyed by a non-null search subscription ID under forced RLS that admits a row only when the transaction's user has an active `search_members` row for that search. Invitation acceptance reads `search_invitations` by token hash through one dedicated database function, not through a membership policy. Evidence shared through an entitlement group MUST require an explicit membership join. Database maintenance roles and backup roles require a documented separation from runtime roles.
 
 ### Requirements and acceptance criteria
 
@@ -997,10 +1052,11 @@ MUST: Run CI path-aware with the D48 check set.
 - Path filters: `backend/**` runs backend, generation and replay jobs; `frontend/**` runs frontend and generation-check jobs; `infrastructure/**` runs CDK test and synth; `ontology/**` and `fixtures/**` run backend ontology, replay and golden jobs. A pull request that changes only `docs/**` or `specs/**` runs only the secret scan and markdown lint (`markdownlint-cli2` with `/.markdownlint-cli2.yaml`); a recorded CI run demonstrates this at the Foundation ready gate.
 
 MUST: Authenticate and authorize REST, MCP, tasks, evidence retrieval and operations controls.
-- A token for tenant A cannot read, infer existence of, mutate, export or obtain signed URLs for tenant B's private records.
+- A token for account A cannot read, infer existence of, mutate, export or obtain signed URLs for account B's private records, or for the data of any search A is not an active member of; each attempt returns `404` with the same body as a nonexistent ID (`test_tenancy.py`).
 - Expired, wrong-audience, wrong-issuer and wrong-token-use tokens fail. MCP and REST return equivalent permitted results for the same principal and use case.
 - Operators need an explicit role and scope for retry, merge, source login, and budget changes; audit records identify actor and reason.
 - MCP serves streamable HTTP at `/mcp`. An unauthenticated MCP request returns 401 with a `WWW-Authenticate` header naming `/.well-known/oauth-protected-resource`, whose metadata names the Cognito issuer. A Cognito access token issued to the MCP app client through authorization code with PKCE succeeds, validated by the same `adapters/auth/cognito.py` checks as REST (`backend/tests/contract/test_mcp.py`).
+- MCP access is client-agnostic (A3). `test_mcp.py` drives the whole flow with a generic test client that follows the MCP authorization specification: it reads the `401` challenge, fetches the protected-resource metadata and the Cognito authorization-server metadata, completes authorization code with PKCE using the published MCP client ID, and calls a tool. No module under `adapters/mcp/` or `adapters/auth/` reads a client name, user agent or other client identity, and no configuration value names an MCP client. The one exception is the callback URL allowlist that Cognito requires on the shared MCP app client (see Risks).
 - Phase 0: `make deploy-identity ENV=dogfood` deploys only `infrastructure/cdk/lib/identity-stack.ts` (user pool, web app client, MCP app client) to the dogfood AWS account; `cdk diff` for that command lists no resource outside the identity stack. `make smoke-dogfood` signs a synthetic user in through the deployed Cognito hosted UI with PKCE and calls one REST endpoint and the MCP endpoint with the issued token. The Foundation ready gate records both outputs.
 
 MUST: Execute work as on-demand task invocations, not always-on workers (D26).
@@ -1008,9 +1064,10 @@ MUST: Execute work as on-demand task invocations, not always-on workers (D26).
 - `infrastructure/dogfood/compose.yaml` defines no service whose command loops over queues or mailboxes; the scheduler service runs only `infrastructure/dogfood/scheduler.crontab` entries, each a `property_focus.cli run-task <kind>` process that exits. `backend/tests/unit/test_runtime_manifests.py` parses both compose files and the crontab and fails on a long-running worker command or on a crontab entry that is not `run-task <kind>` for a kind registered in `runtime/scheduled.py`.
 - Dogfood starts browser tasks with `docker compose run --rm browser-task` through a docker-socket proxy limited to create/start/wait/remove of the pinned browser image; ordinary tasks run as subprocesses of the scheduler container.
 
-MUST: Poll the MLS mailbox every 15–30 seconds through scheduled short-lived invocations in phase 1 (D22, D26).
+MUST: Poll the MLS mailbox every 15–30 seconds within scheduled short-lived invocations in phase 1 (D22, D26).
 - EventBridge Scheduler (AWS) and the dogfood scheduler start `imap-poll` once per minute. The invocation polls at `IMAP_POLL_INTERVAL_SECONDS` (default 20, validated to 15–30), starts no poll after 45 seconds, and exits before 60 seconds.
 - A Postgres advisory lock prevents overlap: a second concurrent invocation exits without fetching (`test_ingestion.py`).
+- The user accepted on 2026-11-02 that per-minute scheduling can leave an occasional gap above 30 s between the last poll of one invocation and the first poll of the next. `test_ingestion.py` asserts the in-invocation interval and the 45 s and 60 s bounds; no test asserts a worst-case gap of 30 s or less. Dogfood reports the measured poll-gap distribution.
 - `imap-poll` stores raw MIME, the `ingest_messages` row and an outbox event, then exits; it does not parse. Parsing runs as a separate task launched from the outbox.
 
 MUST: Preserve and deduplicate MLS intake in phase 1.
@@ -1028,16 +1085,26 @@ MUST: Allow manual property addition by URL or address from phase 1 (D17).
 
 MUST: Separate the experience, the search subscription and the acquisition strategy.
 - Phase 5 ships Homebuyer onboarding, feed and property page under `/homebuyer` (`products/homebuyer/HomeFeed.tsx`, `products/homebuyer/PropertyDetail.tsx`). Phase 8 ships equivalent Investor entry points under `/investor` with acquisition criteria, rent roll and cash-flow comparison. Both call the same generated client and application use cases.
-- Under one sign-in, create two subscriptions with distinct strategy criteria. Editing one subscription leaves the other's evaluations intact; editing the shared PreferenceProfile recomputes evaluations for every subscription that applies it. Include subscription ID and version in evaluation caches, shortlist records, alerts and notification dedupe. Reuse authorized evidence without duplicating ingestion.
-- A tenant has exactly one `ACTIVE` preference profile; creating a second fails the partial unique index (`test_preferences.py`).
-- A `rental_hold` evaluation has `lifestyle_fit: null` and uses the effective hard-requirement set defined under the pre-filter requirement, which drops `household_lifestyle` profile requirements; `owner_occupancy` and `live_in_and_rent` evaluations apply every profile hard requirement (plan recommendation pending the Risks row).
-- REST and MCP reject a subscription version from another subscription. Load subscription membership and input entitlements on the server regardless of the active route.
+- Under one sign-in, create two subscriptions with distinct strategy criteria. Editing one subscription leaves the other's evaluations intact. Editing a private PreferenceProfile creates no search version and changes no evaluation until a member applies the profile to a search. Include subscription ID and version in evaluation caches, shortlist records, alerts and notification dedupe. Reuse authorized evidence without duplicating ingestion.
+- An account has exactly one `ACTIVE` preference profile; creating a second for the same account fails the partial unique index on `tenant_id` (`test_preferences.py`). Two accounts sharing a search each keep their own active profile.
+- A `rental_hold` evaluation has `lifestyle_fit: null` and uses the effective hard-requirement set defined under the pre-filter requirement. Copying a profile into a `rental_hold` search copies only hard requirements whose preference definition has category `property`; copying into an `owner_occupancy` or `live_in_and_rent` search copies every profile hard requirement (plan recommendation).
+- REST and MCP reject a subscription version from another subscription. Check active search membership and input entitlements on the server for every search-scoped request, regardless of the active route.
+
+MUST: Isolate private data per account and share a search only with its members (A1).
+- Phase 0: the first authenticated request from a new Cognito subject creates one `users` row and one tenant owned by that user; repeating the request creates nothing (`test_tenancy.py`).
+- Phase 3: `POST /search-subscriptions` inserts an active `owner` row in `search_members` in the same transaction. Every search-scoped REST route and MCP tool returns `404` to an account without an active membership, on reads and writes alike, with the same body as a nonexistent search ID (`test_tenancy.py`, `test_mcp.py`).
+- Phase 5: `POST /search-subscriptions/{id}/invitations` with `{email}` from the owner returns `201` and sends exactly one invitation email carrying a single-use link; repeating it for an email with a `PENDING` invitation returns `200` with that invitation and sends nothing. A member who is not the owner gets `403`; a non-member gets `404`.
+- `POST /search-invitations/{token}/accept` from a signed-in account whose verified email equals the invited email (case-insensitive) returns `200` and creates an active `member` row; an account created after the invitation accepts the same way. A mismatched email, an expired, already-used or unknown token each return `404` and create no membership row (plan recommendation: email match and 7-day expiry).
+- `GET /search-subscriptions/{id}/members` returns every active member with role, plus pending invitations, to any member.
+- `DELETE /search-subscriptions/{id}/members/{user_id}` returns `204` when the owner removes a member or a member removes themselves. Targeting the owner returns `409` with code `owner_cannot_leave`; a member removing another member gets `403` (plan recommendation). Authorization reads `search_members` on every request and never relies on token claims, so the removed account's next request to any route or tool for that search returns `404`, and it receives no later notification for the search (`test_tenancy.py`).
+- Inside a shared search, member A's `note`, `like` and `dislike` feedback never appears in member B's responses, while A's visit questions, shortlist entries, tours, search versions and the search's evaluations do (`test_tenancy.py`, `frontend/e2e/sharing.spec.ts`).
+- Account B's profile, profile versions, `PROFILE` proposals, interview sessions, profile destinations and their travel times, offer scenarios and offer outcomes return `404` to every other account, including members of B's searches.
 
 MUST: Let subscription members shortlist homes, flag visit questions and record tours in phase 5.
 - `PUT /search-subscriptions/{subscription_id}/shortlist/{property_id}` returns `201` on the first save and `200` with the same entry on repeats; one row exists per subscription/property. `DELETE` on the same path returns `204`, also when no entry exists.
-- An entry saved in one subscription does not appear in `GET /search-subscriptions/{other_id}/shortlist` for the same tenant. A tenant B token receives `404` for tenant A's subscription shortlist, both on read and on `PUT`.
-- `POST /properties/{id}/feedback` (D30) with `kind: visit_question` and non-empty `text` stores a private question for the subscription and property; `GET /search-subscriptions/{subscription_id}/feedback?kind=visit_question&property_id=...` lists it; tenant B receives `404`. Empty `text` returns `422`.
-- `POST /properties/{id}/tours` records a visit and creates at most three post-tour verification requests, the highest VOI scores above the configured threshold (D37).
+- An entry saved in one subscription does not appear in `GET /search-subscriptions/{other_id}/shortlist` for the same account. Every member of a search sees entries saved by any member, each with `saved_by`. A non-member receives `404` on read and on `PUT`.
+- `POST /properties/{id}/feedback` (D30) with `kind: visit_question` and non-empty `text` stores a question visible to every member of the subscription; `GET /search-subscriptions/{subscription_id}/feedback?kind=visit_question&property_id=...` lists it for any member; a non-member receives `404`. Empty `text` returns `422`. Feedback of kind `note`, `like` or `dislike` appears only in its author's responses.
+- `POST /properties/{id}/tours` records a visit visible to every member of the subscription and creates, for the recording member, at most three post-tour verification requests, the highest VOI scores above the configured threshold (D37).
 - `backend/tests/contract/test_api.py` and `backend/tests/integration/test_tenancy.py` cover these cases; `frontend/e2e/dogfood.spec.ts` shortlists a home and flags a visit question from the Homebuyer property page.
 
 MUST: Resolve property and listing identities without destructive guesses (D4).
@@ -1093,14 +1160,15 @@ MUST: Run two analysis tiers with recorded triggers (D1, D6, D53).
 
 MUST: Apply a deterministic hard pre-filter before paid analysis in phase 3 (D3).
 - `domain/funnel.py` stage `prefilter_v1` evaluates listing-fact claims against the effective hard-requirement set of every active subscription across all tenants; a property with known facts failing every subscription gets no `BASELINE` paid call; pass or unknown for any subscription lets it survive. `test_workflows.py` asserts zero `budget_reservations` and zero provider calls for a property rejected by every subscription.
-- Effective hard-requirement set (plan recommendation): the subscription version's hard criteria plus the active profile's hard requirements, except that a `rental_hold` subscription drops profile requirements whose preference definition has category `household_lifestyle`. Before phase 4 no profile exists, so the set is the subscription's hard criteria alone. `test_funnel.py` and `test_evaluation.py` cover each strategy.
-- Creating a subscription, materially changing its criteria or approving a profile hard-requirement change writes `BATCH` invalidations and re-runs the pre-filter over properties with an active listing; a newly surviving property receives a `BASELINE` run.
+- Effective hard-requirement set (plan recommendation): the subscription version's hard criteria, including any hard requirements a member copied in from a profile. No private profile joins the set live. Copy rule: into a `rental_hold` search, copy only requirements whose preference definition has category `property`; into other strategies, copy every profile hard requirement. Before phase 4 no profile exists, so the set is the subscription's own hard criteria. `test_funnel.py` and `test_evaluation.py` cover each strategy, and assert that editing a profile after a copy leaves the set unchanged.
+- Creating a subscription or materially changing its criteria, including applying a profile, writes `BATCH` invalidations and re-runs the pre-filter over properties with an active listing; a newly surviving property receives a `BASELINE` run.
 - The stage runs without an LLM in `backend/tests/unit/test_funnel.py`, records its version on each decision, and can run a candidate version in shadow, reporting disagreements without changing outcomes.
 
 MUST: Version search subscriptions and gate material changes in phase 3 (D16, D17).
 - `POST /search-subscriptions` creates a subscription and its first immutable `search_subscription_versions` row. `PATCH /search-subscriptions/{id}` with `If-Match` creates a new version and returns `200` with it; a stale ETag returns `412`; prior versions remain readable through `GET /search-subscriptions/{id}/versions`; no code path updates a version row (`test_subscriptions.py`).
 - `domain/subscriptions.py` classifies a subscription diff as `MATERIAL` when it changes geography or budget; adds, removes or edits a hard criterion; changes strategy (plan recommendation); or moves a soft-criterion weight by more than 0.05 normalized share. Everything else, such as name or notification policy, is `LOW_IMPACT`. Table-driven tests cover each rule.
-- A member's `PATCH` with a `MATERIAL` diff returns `409` with code `material_change_requires_confirmation` and the material items unless the body sets `confirm_material: true`.
+- Any member's `PATCH` with a `MATERIAL` diff returns `409` with code `material_change_requires_confirmation` and the material items unless the body sets `confirm_material: true`; the confirmed version records that member as `created_by`.
+- From phase 4, `POST /search-subscriptions` and `PATCH /search-subscriptions/{id}` accept `apply_profile: true`. The server copies the caller's active profile version into the new version: hard requirements under the copy rule, soft preferences, dimension weights, and the profile destinations those preferences reference. The copy replaces the previously copied section, records the source profile version and the applying user, and has origin `PROFILE_COPY`. On `PATCH`, a copy that changes a hard requirement or a dimension weight is `MATERIAL`, and the `409` lists every profile destination that would become visible to members (plan recommendation).
 - `POST /search-subscriptions/{id}/revert` with `{version}` and `If-Match` creates a new version with origin `REVERT` whose content digest equals the target version's.
 - Every version records origin, `created_by` and evidence refs; a `LEARNED` or `INTERVIEW` version without evidence refs fails a database constraint.
 - From phase 4, learned and interview changes to a subscription arrive as `preference_proposals` with target kind `SUBSCRIPTION` and follow the proposal rules under the PreferenceProfile requirement.
@@ -1108,37 +1176,39 @@ MUST: Version search subscriptions and gate material changes in phase 3 (D16, D1
 MUST: Implement specialized, versioned analyzers behind a model router (D14, D31).
 - Each analyzer in `analyzers/` declares name, version, analysis tier, required capabilities, input evidence kinds and output attribute keys; an output claim for an undeclared key fails validation.
 - Every `analysis_runs` row records provider, model, model version, prompt version, analyzer version, ontology version, tokens, cost, latency, confidence and structured result.
-- `adapters/ai/router.py` selects a provider by capability (`VISION`, `STRUCTURED_OUTPUT`, `TEXT`) and model policy; a request for a capability no configured provider offers returns `unsupported_capability` before a paid call.
+- `adapters/ai/router.py` selects a provider by capability (`VISION`, `STRUCTURED_OUTPUT`, `TEXT`) and the model policy in `config.py`; a request for a capability no configured provider offers returns `unsupported_capability` before a paid call.
+- With both adapters configured, changing the provider mapped to a capability in `config.py` routes the next run for that capability to the other provider with no analyzer code change; `test_ai.py` asserts this for each capability (A2).
 - Identical computation keys (input evidence digests plus analyzer, prompt, model and ontology versions) reuse the existing run; changing any one creates a new run (D54).
 
 MUST: Implement bounded, provider-independent AI calls with structured validation.
-- A fake provider can exercise analyzers without network access; two real adapters pass the same capability contract in `backend/tests/unit/test_ai.py` before the AWS ready gate (phase 9), or earlier when a second provider enters use.
+- A fake provider can exercise analyzers without network access. The OpenAI (`adapters/ai/openai.py`) and Anthropic (`adapters/ai/anthropic.py`) adapters ship with the first analyzer set in phase 3, and both pass the same provider contract in `backend/tests/unit/test_ai.py`, using recorded provider responses and no network, at the Intelligence ready gate (A2).
 - Invalid output is rejected; permit one bounded repair attempt under budget, then classify `schema_invalid` and preserve safe metadata.
 - Record provider, model, prompt hash, schema hash, input evidence IDs, usage, latency and result digest. Do not log private source text.
 - A malicious instruction embedded in email or HTML cannot call tools, change the schema, access credentials or authorize a write.
 
 MUST: Prioritize human verification by value of information (D37).
-- `domain/verification.py` computes `voi = uncertainty * importance * decision_impact`, where uncertainty is `1 - confidence` (1 for `UNKNOWN` and `CONFLICTING`), importance is the max normalized preference weight referencing the attribute across the tenant's active subscriptions (1 for hard requirements), and decision impact is the absolute change in overall score or requirements status between the attribute's best and worst allowed values.
+- `domain/verification.py` computes `voi = uncertainty * importance * decision_impact`, where uncertainty is `1 - confidence` (1 for `UNKNOWN` and `CONFLICTING`), importance is the max normalized preference weight referencing the attribute across the current versions of the searches the asking user belongs to (1 for hard requirements), and decision impact is the absolute change in overall score or requirements status between the attribute's best and worst allowed values.
 - `GET /verifications` orders by VOI descending and omits requests below `VOI_ASK_THRESHOLD`; an uncertain attribute that no preference references is never asked (`backend/tests/unit/test_verification.py`).
 
 MUST: Version the PreferenceProfile and gate material changes in phase 4 (D16, D34).
 - `PATCH /preferences/{id}` with `If-Match` creates a new immutable `preference_versions` row and returns `200` with it; prior versions remain readable through `GET /preferences/{id}/versions`; a stale ETag returns `412`.
-- `domain/preferences.py` classifies a profile diff as `MATERIAL` when it adds, removes or edits a hard requirement; changes importance to or from `critical`; adds, removes or edits a tradeoff that involves a hard or `critical` preference; changes any dimension weight; or moves a soft weight by more than 0.05 normalized share, or cumulative learned drift exceeds 0.10 since the last explicit approval. Everything else is `LOW_IMPACT`. Geography and budget are subscription fields and use the subscription classifier. Table-driven tests cover each rule.
+- `domain/preferences.py` classifies a profile diff as `MATERIAL` when it adds, removes or edits a hard requirement; changes importance to or from `critical`; adds, removes or edits a tradeoff that involves a hard or `critical` preference; changes any dimension weight; or moves a soft weight by more than 0.05 normalized share, or cumulative learned drift exceeds 0.10 since the last explicit approval (thresholds confirmed by the user on 2026-11-02). Everything else is `LOW_IMPACT`. Geography and budget are subscription fields and use the subscription classifier. Table-driven tests cover each rule.
 - A member's `PATCH` with a `MATERIAL` diff returns `409` with code `material_change_requires_confirmation` and the material items unless the body sets `confirm_material: true`.
 - Learned updates from feedback create `preference_proposals` whose target kind is `PROFILE` or `SUBSCRIPTION`, classified by that target's classifier: `LOW_IMPACT` proposals apply automatically as a version of the target with origin `LEARNED` and their evidence feedback IDs; `MATERIAL` proposals wait as `AWAITING_APPROVAL` until `POST /preferences/{id}/proposals/{proposal_id}/approve` or `/reject` (profile) or `POST /search-subscriptions/{id}/proposals/{proposal_id}/approve` or `/reject` (subscription). A learned budget change leaves the subscription's current version unchanged until approval (`test_preferences.py`).
+- Only the profile's owner may approve or reject a `PROFILE` proposal; any other account gets `404`. Any active member of the search may approve or reject a `SUBSCRIPTION` proposal; `decided_by` and an audit event record that member and the reason, and a second decision on the same proposal returns `409` (plan recommendation). Members see a `SUBSCRIPTION` proposal's diff, materiality and the count of supporting feedback items; the content of `note`, `like` and `dislike` evidence stays visible only to its author.
 - `POST /preferences/{id}/revert` with `{version}` creates a new version whose content digest equals the target version's.
 - Each preference references a definition in `preference_definitions` for the profile's ontology version; a reference to an unknown definition returns `422`.
 
 MUST: Run the adaptive preference interview with explicit state in phase 4 (D15).
-- `POST /preferences/{id}/interview-sessions` starts a session; `POST /interview-sessions/{id}/answers` returns the next questions and any proposals. Structured questions fill the required slots (geography, budget, bedrooms, property type, deal-breakers) before free conversation. The session takes an optional `search_subscription_id`: geography and budget answers become `SUBSCRIPTION` proposals against it, or, without one, a `SUBSCRIPTION` proposal with no target whose approval creates the subscription (`201`); no geography or budget value ever enters a `preference_versions` row (`test_preferences.py`).
+- `POST /preferences/{id}/interview-sessions` starts a session; `POST /interview-sessions/{id}/answers` returns the next questions and any proposals. Structured questions fill the required slots (geography, budget, bedrooms, property type, deal-breakers) before free conversation. A session edits only the caller's own profile. It takes an optional `search_subscription_id` of a search the caller belongs to (`404` otherwise): geography and budget answers become `SUBSCRIPTION` proposals against it, or, without one, a `SUBSCRIPTION` proposal with no target whose approval creates the subscription with the caller as owner (`201`); no geography or budget value ever enters a `preference_versions` row (`test_preferences.py`).
 - The model request contains the session state object and at most the last 6 turns; `test_preferences.py` asserts that turn 20's request payload is no larger than turn 7's plus the size of the state delta.
 - Proposals from the interview link each lifestyle goal to preferences, satisfying ontology attributes, importance and tradeoffs, and example properties; they apply only through the proposal approval path.
 
 MUST: Implement deterministic evaluation: requirements in phase 3, dimensions in phase 4 (D9).
-- Fixed profile, preference, subscription and scoring versions produce identical requirements status, dimension scores, coverage, critical mismatches, overall score and explanation-input digest.
+- A fixed intelligence profile revision, subscription version and scoring version produce identical requirements status, dimension scores, coverage, critical mismatches, overall score and explanation-input digest.
 - Requirements (phase 3, over the effective hard-requirement set): hard false yields `fail`; hard unknown yields `unknown` unless another criterion fails, in which case `fail` takes precedence; `pass` requires all hard criteria true. Phase 3 evaluations carry requirements only, with null dimension scores and overall.
 - For each scored dimension D in {lifestyle_fit, property_quality, value}: validate weights as nonnegative with positive total; `score_D = 100 * sum(weight * known_utility) / sum(all_weights)` and `coverage_D = sum(known_weights) / sum(all_weights)`. Unknown, `CONFLICTING` and stale values follow the frozen unknown policy and cannot silently pass hard requirements.
-- Critical mismatches list every `critical`-importance preference whose known utility is 0. `overall = max(0, sum(dim_weight * score_D) / sum(dim_weight over applicable D) - CRITICAL_PENALTY * count(critical_mismatches))`; scoring version `scoring_v1` (phase 4) uses lifestyle 0.6 and property quality 0.4 with `CRITICAL_PENALTY = 15`; `scoring_v2` (phase 7) adds value with lifestyle 0.5, quality 0.25, value 0.25. Weights come from the profile's dimension weights when set. `owner_occupancy` subscriptions stay on `scoring_v2`.
+- Critical mismatches list every `critical`-importance preference whose known utility is 0. `overall = max(0, sum(dim_weight * score_D) / sum(dim_weight over applicable D) - CRITICAL_PENALTY * count(critical_mismatches))`; scoring version `scoring_v1` (phase 4) uses lifestyle 0.6 and property quality 0.4 with `CRITICAL_PENALTY = 15`; `scoring_v2` (phase 7) adds value with lifestyle 0.5, quality 0.25, value 0.25. Weights come from the subscription version's dimension weights, set directly or copied from a profile, when set. `owner_occupancy` subscriptions stay on `scoring_v2`.
 - `analyzers/explanation.py` receives only the computed evaluation and cited claims; its output text is stored separately and changing it cannot change any number. A test with a fake provider returning numbers in text asserts unchanged scores.
 - Exclude `fail` homes from the default feed; `requirements=fail` shows them. `GET /properties?search_subscription_id=` orders by requirements group (`pass`, `unknown`, `fail`), then overall descending under the subscription's scoring version, then `id`. For `rental_hold` and `live_in_and_rent` subscriptions from phase 8, the Investor and Homebuyer feeds order by requirements group, then `scoring_v3` overall descending, then `id`.
 - From phase 8, for `rental_hold` and `live_in_and_rent` subscriptions, `application/evaluation.py` calls `domain/underwriting.py` with the subscription version's budget and financing assumptions and the property's resolved unit and expense values. Criteria on `underwriting.net_operating_income` and `underwriting.cash_flow` then evaluate like any other attribute; a null underwriting output yields `unknown`. `property_evaluations` stores the underwriting version and digest, and `test_evaluation.py` asserts identical results for identical inputs.
@@ -1147,15 +1217,16 @@ MUST: Implement deterministic evaluation: requirements in phase 3, dimensions in
 - A `live_in_and_rent` hard criterion on `unit.available_at_closing` passes when at least one unit is `true`, fails when every unit is `false`, and is `unknown` otherwise. Unknown homes appear in the `unknown` requirements group of the feed, never among confirmed matches.
 
 MUST: Keep reusable intelligence separate from tenant decisions.
-- Two authorized tenants may reuse a rights-cleared property profile, while their evaluations, preference versions, destinations, travel times and offer scenarios differ and remain private.
-- A profile built from restricted tenant evidence is not served to another tenant through shared cache lookup.
-- Changing preferences recomputes evaluations without recapturing unchanged source evidence or rerunning analyzers; changing an ontology or analyzer version creates a new profile revision.
+- Two authorized accounts may reuse a rights-cleared property profile, while their preference versions, profile destinations, travel times and offer scenarios differ and remain private; evaluations differ per search and stay within each search's members.
+- A profile built from evidence restricted to one account is not served to another account through shared cache lookup.
+- Changing a search's criteria or copied preferences recomputes its evaluations without recapturing unchanged source evidence or rerunning analyzers; changing an ontology or analyzer version creates a new profile revision.
 
-MUST: Deliver location intelligence and tenant travel times in phase 6 (D42, D43).
+MUST: Deliver location intelligence and destination travel times in phase 6 (D42, D43).
 - The location subsystem writes claims for the location and traffic attributes in ontology v1, including `location.traffic_level`, `location.functional_class`, `location.estimated_daily_traffic`, `location.through_traffic_likelihood`, `location.lane_count`, `location.speed_limit`, `location.signal_proximity`, `location.truck_traffic`, `location.cut_through_risk` and `location.cul_de_sac`, each `OBSERVED` when measured and `INFERRED` when estimated.
 - `location.traffic_level` (`QUIET`, `MODERATE`, `BUSY`) is a first-class attribute usable in hard and soft preferences.
-- Destinations in the preference version carry label, kind (`work`, `school`, `family`, `gym`, `airport`, `other`), location, time windows (weekday set plus arrive-by or depart-at time), mode and importance. Travel times are computed per property, destination and window and stored in `travel_time_results`; tenant B cannot read tenant A's destinations or results (`test_tenancy.py`).
-- Changing a destination recomputes only that tenant's travel times and evaluations.
+- A destination lives on a preference version (profile destination, private) or on a subscription version (search destination, visible to members) and carries label, kind (`work`, `school`, `family`, `gym`, `airport`, `other`), location, time windows (weekday set plus arrive-by or depart-at time), mode and importance. Travel times are computed per property, destination and window and stored in `travel_time_results`.
+- Only search destinations feed a search's evaluation; profile destinations produce travel times shown only to their owner (plan recommendation). Every other account, including a fellow member of a shared search, receives `404` for a profile destination or its results (`test_tenancy.py`).
+- Changing a profile destination recomputes only its owner's travel times and changes no evaluation. Changing a search destination recomputes that search's travel times and evaluations.
 
 MUST: Deliver the phase 5 user loop with graceful partial results.
 - A user can sign in, run the interview, inspect the feed, open evidence, inspect fit dimensions and unknowns, edit preferences, approve a proposal, and submit a correction.
@@ -1182,7 +1253,7 @@ MUST: Apply the D55 failure taxonomy, bounded retries and operations recovery.
 - `GET /ops/workflow-runs` and `pages/Operations.tsx` list failed work by class with scoped, audited replay.
 
 MUST: Enforce cost reservations and attribution from the first paid analyzer call in phase 3; add budget controls in phase 5 (D56).
-- Phase 3: `application/budgets.py` reserves estimated spend in `budget_reservations` before every provider call against the tenant's budget for the call's budget tier (`BASELINE`, `DEEP`, `EXPERIMENT`), configured in `config.py`; analyzers contain no cost limits. Each reservation and usage event records analysis tier, budget tier, property, workflow run, analysis run, cost category, analyzer, model and provider. Concurrent tasks cannot reserve more than the available budget (`test_workflows.py`); reservations expire or reconcile after uncertain outcomes through a repair task.
+- Phase 3: `application/budgets.py` reserves estimated spend in `budget_reservations` before every provider call against the paying account's budget for the call's budget tier (`BASELINE`, `DEEP`, `EXPERIMENT`), configured in `config.py`; analyzers contain no cost limits. Paid work started for a search charges the search owner's account; a member's `MANUAL` request charges that member's account (plan recommendation). Each reservation and usage event records analysis tier, budget tier, property, workflow run, analysis run, cost category, analyzer, model and provider. Concurrent tasks cannot reserve more than the available budget (`test_workflows.py`); reservations expire or reconcile after uncertain outcomes through a repair task.
 - Every paid operation has one usage event linked to its workflow run and payer; shared costs have an explicit owner rather than duplicate full charges to multiple tenants.
 - Exhausted budget prevents new optional provider calls, marks those components `DEFERRED` and leaves ingestion and existing-result access usable.
 - Evaluation reports include cost and latency per property next to quality metrics for every compared version.
@@ -1191,6 +1262,7 @@ MUST: Enforce cost reservations and attribution from the first paid analyzer cal
 MUST: Provide email and in-app notifications through `NotificationStrategy` with deduplication (D51).
 - `EmailNotificationStrategy` and `InAppNotificationStrategy` implement one `NotificationStrategy` protocol; adding a strategy requires no change to `application/notifications.py` selection logic (`backend/tests/unit/test_notifications.py` registers a fake strategy).
 - Replaying an event does not duplicate the in-app record; email dedupe uses result/event revision plus recipient/strategy and records ambiguous provider outcomes.
+- A search event notifies each active member once, through that member's own channel settings, with the recipient user in the dedupe key; a member removed before dispatch receives nothing (`test_notifications.py`).
 - User opt-out and the subscription's notification policy (threshold, digest window, cooldown) affect dispatch; source login failures notify once per unresolved episode.
 - Notification content does not disclose private financial details; deep links require authenticated authorization.
 
@@ -1229,8 +1301,8 @@ MUST: Gate probabilistic valuation and tenant offer strategy in phases 7 and 8 (
 - In phase 8, accept a permitted rent roll, lease or expense statement through `POST /properties/{id}/documents` as immutable evidence and create dated unit claims for occupancy, lease end, contractual rent and rent period. Keep collected and projected rent as distinct claim types. Store operating expenses with subject, period and source. A buyer assumption remains private to its scenario.
 - For a common period and currency, compute effective rental income from included units under a stated rent basis and explicit vacancy assumption. Apply vacancy once. Subtract operating expenses to obtain net operating income, then debt service and separately identified reserves for modeled cash flow. A live-in scenario excludes rent for the selected owner unit but keeps whole-property costs. Return null and missing-field reasons for incomplete required inputs. Allow an explicit zero.
 - Offer scenarios: `walk_away = min(confirmed hard financial limit, underwriting price ceiling for income strategies, p50 * (1 + premium_tolerance))`; `value_bid = min(p50, walk_away)`; `competitive_bid = min(q(0.65 + 0.10 * high_competition), walk_away)`; `win_focused_bid = min(p90, walk_away)`, where `premium_tolerance` and `high_competition` come from the subscription version and active-competition claims. Bids satisfy `value_bid <= competitive_bid <= win_focused_bid <= walk_away` and never exceed a confirmed hard limit. Output each binding constraint.
-- Recalculate offer scenarios from frozen tenant inputs, valuation revision, financing assumptions and repair reserves; identical inputs give identical outputs.
-- `POST /offer-scenarios/{id}/outcomes` records offered amount, result and final sale price when known; outcomes stay tenant-private and appear in the evaluation dataset only with tenant consent.
+- Recalculate offer scenarios from frozen buyer inputs, valuation revision, financing assumptions and repair reserves; identical inputs give identical outputs.
+- `POST /offer-scenarios/{id}/outcomes` records offered amount, result and final sale price when known; outcomes stay private to the creating account and appear in the evaluation dataset only with that account's consent.
 - Omit seller acceptance probabilities unless a separately evaluated probability model supports them.
 
 SHOULD: Prefer one source, one concrete analyzer set and one deployment path per new phase.
@@ -1279,7 +1351,9 @@ ComponentState = Literal['PENDING', 'RUNNING', 'COMPLETE', 'DEFERRED',
 @dataclass(frozen=True)
 class ExecutionContext:
     principal_id: str
-    tenant_id: UUID
+    tenant_id: UUID   # the signed-in user's own account (A1)
+    # Search access is not carried here: each search-scoped call checks
+    # search_members for principal_id inside the transaction.
     entitlement_ids: tuple[UUID, ...]
     correlation_id: str
     roles: frozenset[str]
@@ -1428,8 +1502,7 @@ interface PropertyEvaluation {
   strategy: AcquisitionStrategy;
   property_id: string;
   profile_revision: string;
-  preference_version: string;
-  subscription_version: string;
+  subscription_version: string; // carries any copied profile preferences
   ontology_version: string;
   scoring_version: string;
   underwriting_version: string | null; // null for owner_occupancy
@@ -1485,7 +1558,7 @@ interface Problem {
 }
 ```
 
-Tenant comes from authenticated membership selection, not an arbitrary body field. Use `/v1/tenants/{tenant_id}` as an explicit selector and validate membership; never trust the path alone. The paths below are relative to that prefix, except `/health/live`, `/health/ready` and the administrative OpenAPI export. Resources use plain REST verbs; action endpoints exist only for workflows (D30).
+The tenant is the signed-in user's own account, derived from the validated token and never from a path or body field (A1). Search-scoped requests name the search ID and pass an active-membership check on every request. The paths below are relative to `/v1`, except `/health/live`, `/health/ready` and the administrative OpenAPI export. Resources use plain REST verbs; action endpoints exist only for workflows (D30).
 
 | Method and path | Request | Success response and behavior |
 |---|---|---|
@@ -1498,14 +1571,14 @@ Tenant comes from authenticated membership selection, not an arbitrary body fiel
 | `GET /properties/{id}/evaluation` | `search_subscription_id` | `200 PropertyEvaluation` for current versions, cached or deterministically computed |
 | `GET /properties/{id}/evidence` | Pagination | Authorized evidence asset metadata, no raw storage credentials |
 | `POST /evidence/{id}/download` | Empty body | Short-lived signed URL and expiry; default 5 minutes |
-| `POST /properties/{id}/documents` | `multipart/form-data`: one `file` (`application/pdf`, `text/csv`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `image/jpeg`, `image/png`; max 20 MiB), `document_type` (`rent_roll`, `lease`, `expense_statement`), optional `unit_id`; `Idempotency-Key` | `202 {evidence_id,workflow_run_id,status_url}`; stores tenant-private evidence before extraction; the completed run's result references list the created claim IDs; a repeated digest returns the existing evidence; `413` oversize, `415` unsupported type; phase 8 |
+| `POST /properties/{id}/documents` | `multipart/form-data`: one `file` (`application/pdf`, `text/csv`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `image/jpeg`, `image/png`; max 20 MiB), `document_type` (`rent_roll`, `lease`, `expense_statement`), optional `unit_id`; `Idempotency-Key` | `202 {evidence_id,workflow_run_id,status_url}`; stores evidence private to the uploading account before extraction; the completed run's result references list the created claim IDs; a repeated digest returns the existing evidence; `413` oversize, `415` unsupported type; phase 8 |
 | `POST /properties/{id}/deep-analysis` | `{reason?}`; `Idempotency-Key` | `202 {trigger_id,workflow_run_id,status_url}`; `MANUAL` trigger, analysis tier `DEEP`, `DEEP` budget tier checked; phase 3 |
 | `POST /properties/{id}/reanalyze` | `{components?, analysis_tier, force:false}`; `Idempotency-Key` | `202 {workflow_run_id,status_url}`; resolves `MANUAL` invalidations; `force` restricted to operators and budget checked |
-| `POST /properties/{id}/feedback` | `{search_subscription_id,target_revision,kind,text?}`; `kind` is `note`, `visit_question`, `like` or `dislike`; `text` required for `visit_question` | `201` private feedback; `like`/`dislike` may create preference proposals |
-| `POST /properties/{id}/tours` | `{search_subscription_id,visited_at}` | `201` tour plus up to three post-tour verification requests; phase 5 |
+| `POST /properties/{id}/feedback` | `{search_subscription_id,target_revision,kind,text?}`; `kind` is `note`, `visit_question`, `like` or `dislike`; `text` required for `visit_question` | `201`; a `visit_question` is visible to the search's members, other kinds to the author only; a non-member gets `404`; `like`/`dislike` may create preference proposals |
+| `POST /properties/{id}/tours` | `{search_subscription_id,visited_at}` | `201` tour visible to the search's members, plus up to three post-tour verification requests for the caller; phase 5 |
 | `GET /workflow-runs/{id}` | None | Run state, step states, failure classes, safe failures, result references |
 | `POST /workflow-runs/{id}/cancel` | `{reason}` | `202` cancellation request; cooperative semantics |
-| `GET /preferences` | None | The tenant's active PreferenceProfile with current version and ETag |
+| `GET /preferences` | None | The caller's own active PreferenceProfile with current version and ETag |
 | `PATCH /preferences/{id}` | Partial profile body, optional `confirm_material`; `If-Match` | `200` new immutable version, schedules re-evaluation; `409 material_change_requires_confirmation`; `412` stale base |
 | `GET /preferences/{id}/versions` | Cursor | Version history with origin, evidence and diff |
 | `POST /preferences/{id}/revert` | `{version}`; `If-Match` | `200` new version equal in content to the target |
@@ -1513,22 +1586,26 @@ Tenant comes from authenticated membership selection, not an arbitrary body fiel
 | `POST /preferences/{id}/proposals/{proposal_id}/approve` and `/reject` | `{reason?}` | `200` applied version or rejected proposal |
 | `POST /preferences/{id}/interview-sessions` | Optional `{search_subscription_id}` | `201` session with state and first questions; geography and budget answers target that subscription; phase 4 |
 | `POST /interview-sessions/{id}/answers` | `{answers}` (structured values or text, optional example property IDs) | `200` updated state, next questions, proposals |
-| `GET /search-subscriptions` | None | Authorized subscriptions with current versions |
-| `POST /search-subscriptions` | `{name,experience,strategy,source,geography,criteria:{hard,soft},notification_policy,budget,financing?,dimension_weights?}` | `201 {search_subscription_id,version}`, ETag; phase 3 |
-| `PATCH /search-subscriptions/{id}` | Partial body over the `POST` fields (geography, criteria, budget, financing, strategy, notification policy, name, dimension weights), optional `confirm_material`; `If-Match` | `200` new immutable version, schedules re-evaluation and pre-filter re-run; `409 material_change_requires_confirmation` for geography, budget, hard-criterion or strategy edits without `confirm_material`; `412` stale base; phase 3 |
+| `GET /search-subscriptions` | None | Searches where the caller is an active member, with the caller's role and current versions |
+| `POST /search-subscriptions` | `{name,experience,strategy,source,geography,criteria:{hard,soft},notification_policy,budget,financing?,dimension_weights?,apply_profile?}` | `201 {search_subscription_id,version}`, ETag; the caller becomes `owner`; phase 3 (`apply_profile` from phase 4) |
+| `PATCH /search-subscriptions/{id}` | Partial body over the `POST` fields (geography, criteria, budget, financing, strategy, notification policy, name, dimension weights, search destinations), optional `apply_profile` (phase 4) and `confirm_material`; `If-Match`; any member | `200` new immutable version, schedules re-evaluation and pre-filter re-run; `409 material_change_requires_confirmation` for geography, budget, hard-criterion or strategy edits without `confirm_material`; `412` stale base; phase 3 |
 | `GET /search-subscriptions/{id}/versions` | Cursor | Version history with origin, evidence and diff; phase 3 |
 | `POST /search-subscriptions/{id}/revert` | `{version}`; `If-Match` | `200` new version equal in content to the target; phase 3 |
 | `GET /search-subscriptions/{id}/proposals` | State filter | Learned and interview proposals targeting this subscription; phase 4 |
 | `POST /search-subscriptions/{id}/proposals/{proposal_id}/approve` and `/reject` | `{reason?}` | `200` applied subscription version (or created subscription) or rejected proposal; phase 4 |
 | `PUT /search-subscriptions/{id}/shortlist/{property_id}` | Empty body | `201` on first save, `200` with the same entry on repeat; DELETE on the same path returns `204`, idempotent; phase 5 |
-| `GET /search-subscriptions/{id}/shortlist` | Cursor | Shortlist entries for this subscription only |
-| `GET /search-subscriptions/{id}/feedback` | `kind`, `property_id`, cursor | Private notes and visit questions for this subscription |
+| `GET /search-subscriptions/{id}/shortlist` | Cursor | Shortlist entries for this subscription only, saved by any member, each with `saved_by` |
+| `GET /search-subscriptions/{id}/feedback` | `kind`, `property_id`, cursor | The search's visit questions plus the caller's own notes, likes and dislikes |
+| `POST /search-subscriptions/{id}/invitations` | `{email}` | `201` invitation and one email with a single-use link; `200` with the existing `PENDING` invitation on repeat; owner only (`403` for a member, `404` for a non-member); phase 5 |
+| `POST /search-invitations/{token}/accept` | Empty body; signed-in caller | `200 {search_subscription_id, role: member}` when the caller's verified email matches; `404` for a mismatched email or an unknown, expired or used token; phase 5 |
+| `GET /search-subscriptions/{id}/members` | None | Active members with role, plus pending invitations; any member; phase 5 |
+| `DELETE /search-subscriptions/{id}/members/{user_id}` | None | `204`; the owner removes a member or a member removes themselves; `409 owner_cannot_leave` for the owner; `403` when a member targets another member; access ends on the removed account's next request; phase 5 |
 | `POST /claims/{id}/verifications` | `{outcome,corrected_value?,evidence_ids?,reason}` | `201` `HUMAN` claim and verification record (D36) |
 | `GET /verifications` | State, cursor | VOI-ordered review queue restricted to allowed scope (D37) |
 | `GET /notifications` | Cursor, unread filter | In-app inbox |
 | `PATCH /notifications/{id}` | `{read:true}` | Updated record |
 | `PUT /notification-settings` | Channel opt-ins and addresses, timezone | Validated settings; per-subscription policy lives on the subscription |
-| `POST /offer-scenarios` | Subscription ID, preference, subscription and valuation revisions, owner unit ID for live-in, rent basis, `expense_claim_ids`, optional `expense_overrides` (category, amount, currency, period), financing, reserves, premium tolerance | `201` immutable scenario with `OfferScenarioResult`; each expense line is labelled `claim` or `buyer_assumption`; overrides stay private to the scenario; phase 8 |
+| `POST /offer-scenarios` | Subscription ID (caller must be a member), subscription and valuation revisions, owner unit ID for live-in, rent basis, `expense_claim_ids`, optional `expense_overrides` (category, amount, currency, period), financing, reserves, premium tolerance | `201` immutable scenario private to the caller, with `OfferScenarioResult`; each expense line is labelled `claim` or `buyer_assumption`; overrides stay private to the scenario; phase 8 |
 | `GET /offer-scenarios/{id}` | None | Immutable scenario inputs and output; phase 8 |
 | `POST /offer-scenarios/{id}/outcomes` | `{offered_amount,result,final_sale_price?}` | `201` private outcome record; phase 8 |
 | `GET /ops/workflow-runs` | Failure class, code, age, source, cursor | Scoped operator list of failed and paused work |
@@ -1544,9 +1621,9 @@ REST errors use `application/problem+json`. Use 400 for malformed input, 401 for
 
 For product-specific requests, MCP accepts the same subscription ID and version inputs as REST. Offer scenario results, through REST and the phase 8 MCP tools, include strategy, currency, period, included units, rent basis, effective rent, operating expenses, net operating income, debt service, reserves, cash flow, the four bid outputs and missing inputs. Return computed subtotals for which all inputs are available.
 
-MCP tool names mirror the REST resources, and each lands with its REST counterpart: phase 1 `list_properties`, `get_property`, `get_property_listings`, `get_property_history`, `add_property`, `get_workflow_run`; phase 2 `get_evidence_metadata`; phase 3 `get_property_intelligence`, `get_property_evaluation`, `request_deep_analysis`, `request_reanalysis`, `list_search_subscriptions`, `create_search_subscription`; phase 4 `get_preferences`, `update_preferences`; phase 5 `record_feedback`; phase 8 `create_offer_scenario`, `get_offer_scenario`. Use the same request/result schemas and principal context. Mark mutating tools as writes, require idempotency keys for workflow creation, require `confirm_material` for material preference changes, and apply membership and budget checks. Do not expose source credentials, arbitrary SQL, arbitrary URL fetching, operator tools or the interview in the initial MCP surface. Evidence content access uses authorized application reads, not public object URLs.
+MCP tool names mirror the REST resources, and each lands with its REST counterpart: phase 1 `list_properties`, `get_property`, `get_property_listings`, `get_property_history`, `add_property`, `get_workflow_run`; phase 2 `get_evidence_metadata`; phase 3 `get_property_intelligence`, `get_property_evaluation`, `request_deep_analysis`, `request_reanalysis`, `list_search_subscriptions`, `create_search_subscription`; phase 4 `get_preferences`, `update_preferences`; phase 5 `record_feedback`; phase 8 `create_offer_scenario`, `get_offer_scenario`. Use the same request/result schemas and principal context. Mark mutating tools as writes, require idempotency keys for workflow creation, require `confirm_material` for material preference changes, and apply membership and budget checks. `list_search_subscriptions` returns only searches where the caller is an active member, and every search-scoped tool applies the same membership check as REST. Do not expose source credentials, arbitrary SQL, arbitrary URL fetching, operator tools, search membership changes or the interview in the initial MCP surface (plan recommendation for membership changes). Evidence content access uses authorized application reads, not public object URLs.
 
-MCP transport and auth: serve the streamable HTTP transport at `/mcp` in stateless mode with JSON responses, so each request fits one Lambda invocation. `make dev` serves it on loopback 8001; dogfood runs it as the `mcp` service in `infrastructure/dogfood/compose.yaml`, routed by `infrastructure/dogfood/Caddyfile`; AWS runs it as a Lambda behind the API Gateway in `infrastructure/cdk/lib/api-stack.ts`. Publish OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` naming the Cognito issuer, per the MCP authorization specification [R8]. `identity-stack.ts` defines a pre-registered public MCP app client using authorization code with PKCE, and MCP clients are configured with its client ID; this is the recommendation whether or not Cognito supports dynamic client registration (Research still required). MCP clients present the access token as `Authorization: Bearer`; the same `adapters/auth/cognito.py` checks as REST validate it and resolve the Cognito subject to the internal `users` row and tenant membership (D28). The MCP Lambda imports the application layer directly (D29); Fargate is not used for MCP (D26, D27).
+MCP transport and auth: serve the streamable HTTP transport at `/mcp` in stateless mode with JSON responses, so each request fits one Lambda invocation. `make dev` serves it on loopback 8001; dogfood runs it as the `mcp` service in `infrastructure/dogfood/compose.yaml`, routed by `infrastructure/dogfood/Caddyfile`; AWS runs it as a Lambda behind the API Gateway in `infrastructure/cdk/lib/api-stack.ts`. Publish OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` naming the Cognito issuer, per the MCP authorization specification [R8]. MCP access is client-agnostic (A3): any client that implements the MCP authorization specification discovers Cognito from the protected-resource metadata and signs in with authorization code and PKCE. `identity-stack.ts` defines one pre-registered public MCP app client, and every MCP client uses its client ID; no code, configuration or test targets a particular client. Whether Cognito supports dynamic client registration stays a research item (Research still required, Risks); the design does not depend on it. MCP clients present the access token as `Authorization: Bearer`; the same `adapters/auth/cognito.py` checks as REST validate it and resolve the Cognito subject to the internal `users` row and that user's account (D28); search-scoped tools then check active search membership. The MCP Lambda imports the application layer directly (D29); Fargate is not used for MCP (D26, D27).
 
 #### Workflow contract
 
@@ -1583,6 +1660,7 @@ Dogfood runs `runtime/local_workflow.py` in one on-demand process, invoking the 
 | `duplicate` | Non-failure | Return existing admitted result/run for matching digest | No retry work |
 | `idempotency_conflict` | `INVALID_INPUT` | Same key with changed input returns 409 | Caller selects a new operation key |
 | `material_change_requires_confirmation` | Non-failure | 409 listing material items | Resubmit with `confirm_material: true` or approve the proposal |
+| `owner_cannot_leave` | Non-failure | 409 when a removal targets the search owner | None in V1; the owner keeps the search |
 | `identity_ambiguous` | Non-failure | Preserve provisional identity and candidates | Audited human link/merge |
 | `auth_required` | `AUTH_REQUIRED` | Pause source work and notify once per episode | Operator refresh and explicit resume |
 | `source_blocked` | `AUTH_REQUIRED` | Account state `BLOCKED`; pause dependent work | Operator clears block and resumes |
@@ -1694,7 +1772,7 @@ make smoke-dogfood
 make storage-check ENV=dogfood
 ```
 
-`make test-live` runs `uv run pytest backend/tests/live -q` only when `PF_LIVE=1` and authorized credentials resolve through the secret provider. `make smoke-aws` MUST require an explicit staging account allowlist and invoke `uv run pytest backend/tests/aws -q`; it must not create or delete production data. `make smoke-dogfood` uses a synthetic tenant and verifies API readiness, a scheduled `imap-poll` invocation, launched tasks and authorized evidence access. `make storage-check ENV=dogfood` runs `test_evidence_immutability.py` against a dedicated test prefix in the dogfood bucket and refuses MiniStack endpoints. `make deploy-identity ENV=dogfood` runs `pnpm --filter @property-focus/infra exec cdk deploy PropertyFocus-Identity-dogfood --exclusively` against an allowlisted dogfood account and deploys nothing but the identity stack; `deploy-dogfood.yml` runs it on a protected environment. GitHub Actions controls deployments.
+`make test-live` runs `uv run pytest backend/tests/live -q` only when `PF_LIVE=1` and authorized credentials resolve through the secret provider. `make smoke-aws` MUST require an explicit staging account allowlist and invoke `uv run pytest backend/tests/aws -q`; it must not create or delete production data. `make smoke-dogfood` uses a synthetic account and verifies API readiness, a scheduled `imap-poll` invocation, launched tasks and authorized evidence access. `make storage-check ENV=dogfood` runs `test_evidence_immutability.py` against a dedicated test prefix in the dogfood bucket and refuses MiniStack endpoints. `make deploy-identity ENV=dogfood` runs `pnpm --filter @property-focus/infra exec cdk deploy PropertyFocus-Identity-dogfood --exclusively` against an allowlisted dogfood account and deploys nothing but the identity stack; `deploy-dogfood.yml` runs it on a protected environment. GitHub Actions controls deployments.
 
 Key scenarios:
 
@@ -1718,7 +1796,7 @@ Key scenarios:
 | Member requests deep analysis | `MANUAL` trigger, `DEEP` run, property remains usable throughout |
 | Property fails every subscription's known hard requirements | No `BASELINE` paid call; `EXPERIMENT` trigger possible from the harness |
 | One failed optional enrichment | `PARTIAL` profile, successful facts and component retry |
-| Tenant A tries tenant B's evidence ID | Indistinguishable 404; no signed URL |
+| Account A tries account B's private evidence ID | Indistinguishable 404; no signed URL |
 | Concurrent task retries and expired lease | One committed result; stale completion rejected |
 | Two paid calls compete for remaining budget-tier funds | At most the budget-supported reservation succeeds |
 | Learned weight change of 0.03 share | Auto-applied `LEARNED` version with evidence |
@@ -1731,12 +1809,21 @@ Key scenarios:
 | Explanation model output contains a different score | Stored evaluation numbers unchanged |
 | Two valuations, equal p50 above list, different widths | Narrower interval gives the higher value score |
 | Offer scenario with hard limit below p50 | All four outputs at or below the limit; limit listed as binding |
-| Shortlist the same home twice in subscription 1, then open subscription 2 | One entry in subscription 1 (`201` then `200`); subscription 2's shortlist is empty; tenant B gets `404` |
-| Flag a visit question on a home in subscription 1 | `feedback` row with `kind: visit_question`; listed for subscription 1 only; private to the tenant |
+| Shortlist the same home twice in subscription 1, then open subscription 2 | One entry in subscription 1 (`201` then `200`); a second member of subscription 1 sees it with `saved_by`; subscription 2's shortlist is empty; a non-member gets `404` |
+| Flag a visit question on a home in subscription 1 | `feedback` row with `kind: visit_question`; listed for subscription 1 only; visible to every member of subscription 1; a non-member gets `404` |
 | Record a tour | At most three post-tour verification requests, highest VOI first |
 | Live-in duplex search requires a unit available at closing; no claim supports `unit.available_at_closing` for either unit | Requirements `unknown`; home appears in the `unknown` requirements group of the feed, not among confirmed matches |
-| Rental hold subscription evaluates a home far from the household's work destination | `lifestyle_fit` null; travel time does not affect overall |
-| Rental hold subscription; profile hard requirements "commute at most 30 minutes" (`household_lifestyle`) and "at least 2 bedrooms" (`property`); home has 3 bedrooms and a 50-minute commute | Effective set holds the bedroom requirement and subscription criteria only; requirements `pass`; the same home under an `owner_occupancy` subscription is `fail` |
+| Rental hold subscription evaluates a home far from a member's work destination | `lifestyle_fit` null; travel time does not affect overall |
+| A member applies a profile with hard requirements "commute at most 30 minutes" (`household_lifestyle`) and "at least 2 bedrooms" (`property`) to a rental hold search; home has 3 bedrooms and a 50-minute commute | Copied set holds the bedroom requirement only; requirements `pass`; the same profile applied to an `owner_occupancy` search copies both and the home is `fail` |
+| Member edits their private profile after applying it to a shared search | No new search version; evaluations unchanged until a member applies the profile again |
+| Owner invites `spouse@example.com`; spouse signs up with that verified email and accepts | `201` invitation, one email; accept `200`; spouse lists the search in `GET /search-subscriptions` with role `member` |
+| Account with a different verified email presents the same invitation token | `404`; no membership row |
+| Owner removes the spouse, who then reads the shortlist and calls `get_property_evaluation` for the search | Both return `404` on the first request after removal; no further notifications for the search |
+| Member A writes a `note` and a `visit_question` on a shared search | Member B sees the visit question and not the note |
+| Member B approves a material `SUBSCRIPTION` proposal that came from member A's feedback | `200`; new subscription version; `decided_by` is B; a second decision returns `409` |
+| Search event on a search with two members | One notification per member, each through that member's channel settings |
+| Capability `VISION` remapped from the OpenAI adapter to the Anthropic adapter in `config.py` | Next `VISION` run records provider Anthropic; no analyzer code changed |
+| Generic MCP test client with no client-specific configuration | `401` challenge, metadata discovery, authorization code with PKCE, then a successful tool call |
 | Rental hold soft criteria: cash flow floor $0, target $1,000/month (weight 1); DSCR floor 1.00, target 1.25 (weight 1); duplex cash flow $500/month, DSCR 1.10 | `u` = 0.5 and 0.4; investment score 45, coverage 1.0; `scoring_v3` overall uses investment 0.5, value 0.3, quality 0.2 |
 | Same subscription adds cap-rate floor 4%, target 6% (weight 1); debt service unknown, cap rate 5% | Cash flow and DSCR null; investment = 100 × 0.5 / 3 ≈ 16.7, coverage 1/3; requirements unaffected unless a hard criterion uses those metrics |
 | Investor feed with two `pass` homes whose `scoring_v3` overall is 72 and 58 | 72 first, then 58; ties break by `id` |
@@ -1758,21 +1845,21 @@ Create downstream task specs under `/specs/property-focus/tasks/` with exact fil
 
 | Gate | Phase | Dependencies | Required artifacts |
 |---|---|---|---|
-| Foundation ready | 0 | Auth/RLS, Cognito identity stack deployed to the dogfood AWS account, migrations, locked tooling, D47 layout, task launcher and scheduler, outbox publisher and sweep, MCP adapter skeleton, synthetic fixtures | Clean-bootstrap log, tenancy tests, path-aware CI run, no-long-running-worker check (`test_runtime_manifests.py`), `make deploy-identity` output and Cognito sign-in smoke, MCP 401/metadata and authenticated-call contract test, compatibility inventory |
+| Foundation ready | 0 | Auth/RLS, Cognito identity stack deployed to the dogfood AWS account, migrations, locked tooling, D47 layout, task launcher and scheduler, outbox publisher and sweep, MCP adapter skeleton, synthetic fixtures | Clean-bootstrap log, two-account isolation and account-provisioning tests, path-aware CI run, no-long-running-worker check (`test_runtime_manifests.py`), `make deploy-identity` output and Cognito sign-in smoke, MCP 401/metadata and authenticated-call contract test, compatibility inventory |
 | Intake ready | 1 | Evidence store, identity, outbox, scheduled `imap-poll`, manual add API, phase 1 MCP tools | Replay report, raw MIME integrity checks, poll-overlap test, ambiguity review fixture, phase 1 MCP parity |
-| Intelligence ready | 2–3 | Browser, capability registry, ontology v1 ACTIVE, claims, subscriptions with versioned hard criteria, pre-filter, requirements evaluation, first analyzer set, model router, budget tiers and reservations, invalidation, evaluation harness with shadow runs, phase 2–3 MCP tools | Source session drill, ontology coverage report (75+ attributes), pre-filter report with zero paid calls on rejected properties, subscription versioning tests, profile evidence audit, golden-field report over real reviewed cases (synthetic excluded), shadow isolation test, phase 2–3 MCP parity |
-| Evaluation ready | 4 | Preference profile and proposals for both targets, interview, dimension scoring, triggers, phase 4 MCP tools | Deterministic golden evaluations, materiality table tests, trigger-rate report (20–30% AUTO), phase 4 MCP parity |
-| Dogfood ready | 5 | Homebuyer UI with D10 sections, shortlist and visit questions, tours, notifications, operations UI, budget controls, backups, `record_feedback` MCP tool | End-to-end report, phase 5 MCP parity, accessibility report, user-confirmed preference version, dogfood storage-check and restore report |
-| Location ready | 6 | Permitted source, traffic attributes, destinations, travel times | Street inference labels (measured versus inferred), destination privacy tests, source-rights entry |
+| Intelligence ready | 2–3 | Browser, capability registry, ontology v1 ACTIVE, claims, subscriptions with versioned hard criteria and owner membership, pre-filter, requirements evaluation, first analyzer set, model router with OpenAI and Anthropic adapters, budget tiers and reservations, invalidation, evaluation harness with shadow runs, phase 2–3 MCP tools | Source session drill, ontology coverage report (75+ attributes), pre-filter report with zero paid calls on rejected properties, subscription versioning tests, non-member `404` tests on search routes and tools, provider contract report for both adapters (`test_ai.py`), profile evidence audit, golden-field report over real reviewed cases (synthetic excluded), shadow isolation test, phase 2–3 MCP parity |
+| Evaluation ready | 4 | Per-account preference profile, profile copy into searches, proposals for both targets, interview, dimension scoring, triggers, phase 4 MCP tools | Deterministic golden evaluations, materiality table tests, profile-copy tests per strategy, owner-only `PROFILE` and any-member `SUBSCRIPTION` approval tests, trigger-rate report (20–30% AUTO), phase 4 MCP parity |
+| Dogfood ready | 5 | Homebuyer UI with D10 sections, search sharing (invite, accept, members, removal), shortlist and visit questions, tours, notifications, operations UI, budget controls, backups, `record_feedback` MCP tool | End-to-end report, two-account sharing E2E (`sharing.spec.ts`) including removed-member `404`, phase 5 MCP parity, accessibility report, user-confirmed preference version, dogfood storage-check and restore report |
+| Location ready | 6 | Permitted source, traffic attributes, destinations, travel times | Street inference labels (measured versus inferred), profile versus search destination privacy tests, source-rights entry |
 | Valuation ready | 7 | Licensed comps and as-of dataset, comp selector, Value dimension | Frozen thresholds, holdout report, comp explanation audit, abstention behavior |
 | Investor and offer ready | 8 | Valuation, rent evidence, financing, Investment dimension and `scoring_v3`, subscription-scoped routes, offer outcomes, phase 8 MCP tools | Same-account two-subscription E2E, duplex comparison, Investment and `scoring_v3` ordering tests, missing-rent checks, bid ordering tests, phase 8 MCP parity and privacy report |
-| AWS ready | 9 | Infrastructure parity, AWS-side shadow runs, operations drills | CDK diff review, AWS smoke, two-adapter capability contract report, failure/recovery and rollback reports |
+| AWS ready | 9 | Infrastructure parity, AWS-side shadow runs, operations drills | CDK diff review, AWS smoke, failure/recovery and rollback reports |
 
-No gate requires all future features. Dogfood uses real household decisions only after source authorization, user-reviewed preference inputs, budget configuration and evidence visibility work. Engineers can build and test synthetic functionality while these inputs remain open.
+No gate requires all future features. Dogfood uses real buying decisions only after source authorization, user-reviewed preference inputs, budget configuration and evidence visibility work. Engineers can build and test synthetic functionality while these inputs remain open.
 
 ### Decision traceability
 
-One row per register decision. "Req" names the BTL requirement by its leading words.
+One row per register decision and amendment. "Req" names the BTL requirement by its leading words.
 
 | D | Decision | Implemented by | Phase |
 |---|---|---|---|
@@ -1780,7 +1867,7 @@ One row per register decision. "Req" names the BTL requirement by its leading wo
 | D2 | Multi-source ingestion via `PropertySource` | ATL Property pipeline; Req "Model every source as a `PropertySource`"; MAY additional sources | 1 |
 | D3 | Deterministic hard filtering before AI | ATL Property pipeline; `domain/funnel.py`; Req "Apply a deterministic hard pre-filter" (effective hard-requirement set, shadow stage); Req "Run two analysis tiers" (no `BASELINE` before pre-filter) | 3 |
 | D4 | Identity is the physical property/parcel | ATL Identity; Req "Resolve property and listing identities" | 1 |
-| D5 | Tenant-scoped hybrid preferences, one shared profile | ATL Two products; data model `preference_profiles`; Req "Separate the experience…"; Risks row | 0, 4 |
+| D5 | Hybrid preferences with tenant isolation; household-profile part superseded by A1 | ATL Two products; data model `tenants`, `preference_profiles`, forced RLS; Reqs "Authenticate and authorize…", "Isolate private data per account…" | 0, 3–5 |
 | D6 | Moderately aggressive deep research, AUTO/MANUAL/EXPERIMENT | ATL Analysis tiers; `analysis_triggers`; Req "Run two analysis tiers" | 3–4 |
 | D7 | User-independent property analysis; four value statuses | ATL Ontology and claims; Req "Resolve claims to the four value statuses" | 3 |
 | D8 | Preserve history and versioned intelligence | `listing_history`, `analysis_runs` immutability; Req "Implement specialized, versioned analyzers" | 1–3 |
@@ -1791,22 +1878,22 @@ One row per register decision. "Req" names the BTL requirement by its leading wo
 | D13 | Invalidation separate from recomputation | ATL Orchestration; `invalidations`; Req "Track invalidation separately" | 3 |
 | D14 | Specialized analyzers | ATL Analyzers; `analyzers/`; Req "Implement specialized, versioned analyzers" | 3+ |
 | D15 | Adaptive preference interview | ATL Preferences; `interview_sessions`; Req "Run the adaptive preference interview" | 4–5 |
-| D16 | Versioned, selectively automatic preference evolution | ATL Preferences; `preference_proposals` (`PROFILE`/`SUBSCRIPTION` targets), `search_subscription_versions`; Reqs "Version search subscriptions…", "Version the PreferenceProfile…", "Run the adaptive preference interview…"; Risks row | 3–4 |
-| D17 | Property-centric app; `SearchSubscription`; manual add | ATL Two products; `search_subscriptions`; Reqs "Allow manual property addition", "Version search subscriptions…" | 1, 3, 5 |
+| D16 | Versioned, selectively automatic preference evolution | ATL Preferences; `preference_proposals` (`PROFILE`/`SUBSCRIPTION` targets), `search_subscription_versions`; Reqs "Version search subscriptions…" (any-member confirmation, profile copy), "Version the PreferenceProfile…" (thresholds 0.05/0.10 confirmed 2026-11-02; owner-only `PROFILE` and any-member `SUBSCRIPTION` approval), "Run the adaptive preference interview…" | 3–4 |
+| D17 | Property-centric app; `SearchSubscription`; manual add | ATL Two products; `search_subscriptions`, `search_members`; Reqs "Allow manual property addition", "Version search subscriptions…", "Isolate private data per account…" | 1, 3, 5 |
 | D18 | Modular monolith | ATL The design; Req "Bootstrap…" (`check_boundaries.py`) | 0 |
 | D19 | MiniStack + DigitalOcean dogfood, AWS target | ATL Deployment; Req "Establish real AWS compatibility"; `docs/compatibility.md` | 0, 9 |
 | D20 | Python backend, React/TS frontend, TS CDK | Interfaces preamble; Scope map | 0 |
 | D21 | Step Functions; SQS/EventBridge; 5–15 states; no Temporal | ATL Orchestration; Workflow contract; Req "Establish real AWS compatibility" | 3, 9 |
-| D22 | Dedicated mailbox + IMAP polling | ATL Execution model; Req "Poll the MLS mailbox…"; Risks row | 1 |
+| D22 | Dedicated mailbox + IMAP polling | ATL Execution model; Req "Poll the MLS mailbox…" (occasional gaps above 30 s accepted by the user 2026-11-02) | 1 |
 | D23 | Persistent TheMLS Playwright profile | ATL Ingestion state diagram; `source_accounts`; Req "Capture TheMLS pages…" | 2 |
 | D24 | Postgres relational core + JSONB | ATL Identity; Data model preamble | 0–3 |
 | D25 | Relational state + history + outbox | ATL Identity sequence; Req "Commit listing state changes…" | 1 |
 | D26 | Direct task execution, Lambda-first, Fargate | ATL Execution model; Req "Execute work as on-demand task invocations" | 0 |
 | D27 | Serverless API in AWS; FastAPI service on DO | ATL Deployment; `api-stack.ts`; `infrastructure/dogfood/compose.yaml` | 0, 9 |
-| D28 | Cognito with independent app users | ATL Deployment sign-in; Req "Authenticate and authorize…" | 0 |
-| D29 | React + Vite + RTK Query codegen + MCP adapter | ATL The design; MCP tool list; Req "Route REST and MCP through application use cases" (phase 0 skeleton, per-phase tool parity) | 0–5, 8 |
+| D28 | Cognito with independent app users (refined by A3) | ATL Deployment sign-in; Req "Authenticate and authorize…" | 0 |
+| D29 | React + Vite + RTK Query codegen + MCP adapter (refined by A3) | ATL The design; MCP tool list; Req "Route REST and MCP through application use cases" (phase 0 skeleton, per-phase tool parity) | 0–5, 8 |
 | D30 | Resource REST + workflow actions | API table; MCP tool list | 1–8 |
-| D31 | Multi-provider AI (`ModelProvider`, `ModelRouter`) | ATL Analyzers; `adapters/ai/`; Reqs "Implement specialized…", "Implement bounded…" | 3, 9 |
+| D31 | Multi-provider AI (`ModelProvider`, `ModelRouter`; refined by A2) | ATL Analyzers; `adapters/ai/`; Reqs "Implement specialized…", "Implement bounded…" | 3 |
 | D32 | Rich ontology (75–150 attributes) | ATL Ontology; ontology key table; Req "Store the ontology in Postgres…" | 3, 8 |
 | D33 | DB-backed immutable/versioned ontology | ATL Ontology state diagram; `ontology_versions`, `ontology_attributes` | 3 |
 | D34 | Global preference definitions reference the ontology | ATL Preferences; `preference_definitions`; Req "Version the PreferenceProfile…" | 4 |
@@ -1818,7 +1905,7 @@ One row per register decision. "Req" names the BTL requirement by its leading wo
 | D40 | Probabilistic valuation output | `Valuation` interface; value score formula | 7 |
 | D41 | Tenant offer strategy above valuation | ATL Valuation; `offer_scenarios`, `offer_outcomes`; bid formulas | 8 |
 | D42 | Location intelligence subsystem; busy/quiet street | ATL Reusable intelligence; Req "Deliver location intelligence…" | 6 |
-| D43 | Tenant destinations and time-of-day travel times | ATL Reusable intelligence; `travel_time_results`; Req "Deliver location intelligence…" | 6 |
+| D43 | Destinations and time-of-day travel times | ATL Reusable intelligence (profile versus search destinations); `travel_time_results`; Req "Deliver location intelligence…" | 6 |
 | D44 | Content-addressed evidence storage | ATL Identity; `evidence_assets`; Req "Implement content-addressed evidence integrity…" | 1–2 |
 | D45 | Evaluation and experimentation in V1 | ATL Analyzers; ATL Phased rollout (V1 = phases 0–8); Req "Evaluate changes using…" | 2–8 (V1); AWS-side shadow runs 9 |
 | D46 | Three test layers + golden set of real properties | Test strategy layer table; `fixtures/golden/` (real, rights-cleared, redacted, human-reviewed) separate from `fixtures/synthetic/`; Req "Evaluate changes using…" | 0+ |
@@ -1832,6 +1919,9 @@ One row per register decision. "Req" names the BTL requirement by its leading wo
 | D54 | Idempotency system-wide | ATL Analyzers (computation identity); Req "Implement durable, idempotent workflow runs…" | 0–3 |
 | D55 | Failure taxonomy + persisted failed work + ops UI | ATL Orchestration table; Error table classes; Req "Apply the D55 failure taxonomy…" | 0, 5 |
 | D56 | Cost attribution and tier budgets | ATL Deployment (analysis tier versus budget tier); `budget_reservations`; Req "Enforce cost reservations…" | 3, 5 |
+| A1 | Individual accounts with shareable searches (amends D5) | ATL Background, Two products, Accounts and shared searches; `tenants`, `search_members`, `search_invitations`, search-scoped RLS; Reqs "Isolate private data per account…", "Separate the experience…", "Let subscription members shortlist…", "Apply a deterministic hard pre-filter" (copy rule); membership API rows | 0, 3–6 |
+| A2 | OpenAI and Anthropic adapters initially (refines D31) | ATL Analyzers; `adapters/ai/openai.py`, `adapters/ai/anthropic.py`; Reqs "Implement specialized…" (config routing), "Implement bounded…" (shared contract); Intelligence ready gate | 3 |
+| A3 | Client-agnostic MCP over OAuth (refines D28, D29) | ATL The design (MCP sign-in); MCP transport and auth paragraph; Req "Authenticate and authorize…" (generic client test) | 0 |
 
 Cross-cutting principles map as follows: global facts and private interpretation (Req "Keep reusable intelligence separate…"); unknown is not false (Reqs on statuses and requirements logic); evidence and provenance (D35, D44 requirements); deterministic logic and AI that explains only (evaluation and pre-filter requirements); version every computation (D54 computation key); expensive understanding once (D7, analysis tiers); retries and partial failure (D53–D55); simple operations and only-needed abstractions (SHOULD "Prefer one source, one concrete analyzer set…").
 
@@ -1841,7 +1931,7 @@ Cross-cutting principles map as follows: global facts and private interpretation
 
 - The user states this is a brand-new repository. The current workspace contained no product source files during planning; there are no established code patterns, package boundaries or migrations to preserve.
 - The proposed paths are design outputs, not findings from an existing application.
-- The retrieved chat confirms the sequence from foundation through ingestion, TheMLS enrichment, property intelligence, matching, usable product, location, market, offers and hardening. The full set of 56 confirmed decisions lives in [architecture-decisions.md](architecture-decisions.md), the canonical decision list; the current user's architecture inventory supplies the broader required scope.
+- The retrieved chat confirms the sequence from foundation through ingestion, TheMLS enrichment, property intelligence, matching, usable product, location, market, offers and hardening. The full set of 56 confirmed decisions and the amendments A1–A3 live in [architecture-decisions.md](architecture-decisions.md), the canonical decision list; the current user's architecture inventory supplies the broader required scope.
 
 #### External research
 
@@ -1863,7 +1953,15 @@ Research still required: authorized TheMLS terms and page structure, mailbox OAu
 
 #### User-provided artifacts and confirmed inputs
 
-Canonical decision list: [architecture-decisions.md](architecture-decisions.md) (`/specs/property-focus/architecture-decisions.md`) records the user's 56 confirmed architecture decisions and ten cross-cutting principles. Where this plan and the register disagree, the register wins.
+Canonical decision list: [architecture-decisions.md](architecture-decisions.md) (`/specs/property-focus/architecture-decisions.md`) records the user's 56 confirmed architecture decisions, amendments A1–A3 (2026-11-02) and ten cross-cutting principles. Where this plan and the register disagree, the register wins.
+
+User answers to the plan's open questions, 2026-11-02 (quoted where the user's words were supplied verbatim):
+
+> let's have each user create an account and then you can share a search with your spouse etc.
+
+> shouldn't matter — we'll use OAuth
+
+The user also kept the D16 thresholds (0.05/0.10), accepted the D22 per-minute cadence with occasional gaps above 30 s, chose both OpenAI and Anthropic adapters, and confirmed task specs under `/specs/property-focus/tasks/`.
 
 Subsequent product decisions: Homebuyer and residential Investor share a backend and sign-in, with separate sections of one website. Homebuyer ships first. The scope covers single-family homes and residential income acquisitions.
 
@@ -1878,4 +1976,4 @@ Verbatim current architecture inventory:
 
 User-supplied format artifact: `SKILL.md`, name `master-plan-format`, retrieved from the referenced chat attachment. Its required output structure is ATL design narrative plus BTL execution specification, exact file scope, imperative requirements with acceptance criteria, interfaces, error handling, tests, research links and artifact provenance. The user overrode its `.pvpd` path convention.
 
-No source email corpus, TheMLS credential/session, property examples, ontology file, concrete household preferences, financial inputs, valuation dataset or deployment secrets were provided. Synthetic fixtures under `/fixtures/synthetic` are implementation artifacts, never user-supplied source data, and never count toward golden gates; the golden set waits for real, rights-cleared, redacted, human-reviewed properties.
+No source email corpus, TheMLS credential/session, property examples, ontology file, concrete buyer preferences, financial inputs, valuation dataset or deployment secrets were provided. Synthetic fixtures under `/fixtures/synthetic` are implementation artifacts, never user-supplied source data, and never count toward golden gates; the golden set waits for real, rights-cleared, redacted, human-reviewed properties.

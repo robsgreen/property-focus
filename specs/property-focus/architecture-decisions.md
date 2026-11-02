@@ -1,7 +1,7 @@
 # Architecture Decision Register — Property Intelligence Platform
 
 **Status:** Confirmed  
-**Purpose:** Companion document to the master plan. This document enumerates the 56 architecture decisions made during planning so implementation and task-generation agents do not need the original conversation.
+**Purpose:** Companion document to the master plan. This document enumerates the 56 architecture decisions made during planning, plus amendments A1–A3 confirmed by the user on 2026-11-02, so implementation and task-generation agents do not need the original conversation.
 
 ---
 
@@ -85,6 +85,8 @@ Identity resolution must carry confidence and preserve ambiguous cases.
 ---
 
 ## 5. Hybrid preference model with tenant-scoped profiles
+
+**Amended 2026-11-02 (user):** superseded in part by A1 below.
 
 **Decision**
 
@@ -616,6 +618,8 @@ Use Fargate only where Lambda is a poor fit.
 
 ## 28. Cognito as initial identity provider
 
+**Amended 2026-11-02 (user):** refined by A3 below (client-agnostic MCP access).
+
 **Decision**
 
 Use Cognito initially, while keeping application users/tenants independent from Cognito identities.
@@ -635,6 +639,8 @@ Keep an authentication abstraction so Cognito can later be replaced by Auth0, Cl
 ---
 
 ## 29. React + Vite + RTK Query + generated OpenAPI client + MCP adapter
+
+**Amended 2026-11-02 (user):** refined by A3 below (client-agnostic MCP access).
 
 **Decision**
 
@@ -688,6 +694,8 @@ Examples:
 ---
 
 ## 31. Multi-provider AI abstraction
+
+**Amended 2026-11-02 (user):** refined by A2 below (both OpenAI and Anthropic adapters initially).
 
 **Decision**
 
@@ -1327,6 +1335,67 @@ Support configurable budgets by analysis tier rather than embedding cost limits 
 Evaluation should compare:
 
 `quality × cost × latency`
+
+---
+
+# Amendments
+
+Confirmed by the user on 2026-11-02. Each amendment names the decision it changes; the original decision text above is kept unchanged for history. Where an amendment and its original decision conflict, the amendment wins.
+
+---
+
+## A1. Individual accounts with shareable searches (amends D5)
+
+**Decision**
+
+Each person signs up for their own account. A user can share a search subscription with other users, for example a spouse, who then collaborate on it. This replaces D5's model of a tenant as a household with one shared active preference profile.
+
+**Rationale**
+
+The user chose individual accounts plus sharing ("let's have each user create an account and then you can share a search with your spouse etc."). People in one household keep their own preferences while working on a common search.
+
+**Key implications / constraints**
+
+- Each user's private data (their preference profile, feedback and notes) is private to them.
+- A shared search's criteria, evaluations, shortlist and visit questions are visible to and editable by its members.
+- Sharing is by invitation to an existing or new account.
+- A search has one owner; everyone else on it is a member. No other roles.
+- Removing a member revokes that member's access to the search.
+- D5's surviving parts still hold: tenant isolation from day one, no billing/org/RBAC complexity, and global property facts with private interpretation.
+
+---
+
+## A2. OpenAI and Anthropic adapters initially (refines D31)
+
+**Decision**
+
+Implement both OpenAI and Anthropic model-provider adapters initially, behind `ModelProvider` / `ModelRouter`.
+
+**Rationale**
+
+D31 allows one or two initial implementations; the user chose two.
+
+**Key implications / constraints**
+
+- Both adapters satisfy the same `ModelProvider` contract.
+- `ModelRouter` selects a provider by capability and configuration; analyzers never name a vendor.
+
+---
+
+## A3. Client-agnostic MCP access over OAuth (refines D28, D29)
+
+**Decision**
+
+MCP access is client-agnostic: any MCP client that supports the MCP authorization specification (OAuth) can connect. There are no client-specific integrations.
+
+**Rationale**
+
+The user: "shouldn't matter — we'll use OAuth." Standard OAuth removes the need to choose or support particular MCP clients.
+
+**Key implications / constraints**
+
+- The MCP adapter follows the MCP authorization specification, with Cognito (D28) as the authorization server.
+- No code, configuration or tests target a particular MCP client.
 
 ---
 
