@@ -33,3 +33,4 @@ PR: (none)
 - 2026-11-02 02:17 - User chose one PR per phase; implementing Phase 0 (tasks 0.1-0.12) on sdlc/property-focus-p0, based on the planning branch
 - 2026-11-02 02:17 - Phase → Implementation
 - 2026-11-02 02:26 - Task 0.1 complete (make verify green, 24 unit tests); .sdlc links now point at the phase worktree copy
+- 2026-11-02 02:35 - Tasks 0.2 (112 unit tests) and 0.9 (13 infra tests, synth, no AWS calls) complete
