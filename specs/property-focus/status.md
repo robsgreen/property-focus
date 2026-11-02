@@ -62,3 +62,4 @@ PR: (none)
 - 2026-11-02 09:44 - Extra-pass review: N4 high (redaction ReDoS) unresolved; escalated to user
 - 2026-11-02 13:53 - Fix 71694cd (N4, N5): orchestrator timed 1 MB adversarial lines 0.07-0.24 s; make verify green; scoped check dispatched
 - 2026-11-02 14:01 - Review complete (final checks pass) → Phase → Wrap-up
+- 2026-11-02 14:04 - Post-mortem written (drift H2/M9/L2, 13 action items)

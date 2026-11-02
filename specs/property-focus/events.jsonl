@@ -53,3 +53,6 @@
 {"event":"dispatch","ts":"2026-11-02 13:53","agent":"sdlc-reviewer"}
 {"ts":"2026-11-02 14:01","event":"review_round","round":4,"critical":0,"high":0,"medium":0,"low":1,"crossLens":0}
 {"event":"phase_start","ts":"2026-11-02 14:01","phase":"postMortem"}
+{"event":"dispatch","ts":"2026-11-02 14:01","agent":"sdlc-post-mortem"}
+{"event":"dispatch","ts":"2026-11-02 14:04","agent":"sdlc-doc-keeper"}
+{"event":"dispatch","ts":"2026-11-02 14:04","agent":"sdlc-planner"}
