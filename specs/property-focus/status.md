@@ -9,7 +9,7 @@ PR: (none)
 
 - [x] **Planning**
 - [x] **Task Generation**
-- [ ] **Implementation**
+- [x] **Implementation**
 - [ ] **Testing**
 - [ ] **Documentation**
 - [ ] **Review**
@@ -74,3 +74,5 @@ PR: (none)
 - 2026-11-02 15:05 - Task 0.15 complete (884b178; be-check, 414 unit, 172 int). Note: IdP publishing an empty key set bypasses the refetch rate limit (observation).
 - 2026-11-02 15:12 - Task 0.17 complete (e7645f2; 432 unit; Caddy validated; firewall tested in netns). Open: auth.propertyfocus.treb.tech not covered by Cloudflare Universal SSL (2nd-level subdomain).
 - 2026-11-02 15:32 - Task 0.16 complete (0716270; mcp 2.3.0 low-level Server; make verify green). Tier 1 wire differences listed for user review.
+- 2026-11-02 15:32 - Implementation (0.15-0.17) complete → Phase → Testing (TP-0.38-0.50 + gate 0.12.7)
+- 2026-11-02 15:39 - User: rename auth host to auth-propertyfocus.treb.tech; Bot Fight Mode off; limits confirmed (CF 20/10s; 120/60 per min; WAF 1000/300 per 5 min). To apply after the tester finishes (gate file overlap).

@@ -141,3 +141,8 @@ Final checks: pass
 
 ## Review complete
 No unresolved critical/high or gating-mechanical findings. Tier 1 gate: user will review personally (recorded). Observations to present at the PR gate: P43–P46, N2-era observations resolved, N3/N5 resolved, N6, flaky-bound note, P49 accepted risk.
+
+## User direction (round 3 decisions)
+- Sign-in host renamed to `auth-propertyfocus.treb.tech` (first-level, covered by Cloudflare Universal SSL); app host stays `propertyfocus.treb.tech`.
+- Cloudflare Bot Fight Mode: OFF.
+- Initial limits confirmed: Cloudflare 20 req / 10 s per IP on sign-in, registration and /mcp paths; per-account 120/min REST, 60/min MCP (phase 5); AWS WAF 1000 / 5 min per IP, 300 for /mcp (phase 9).

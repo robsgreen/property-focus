@@ -68,3 +68,6 @@
 {"event":"dispatch","ts":"2026-11-02 14:54","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-02 14:54","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-02 15:12","agent":"sdlc-coder"}
+{"event":"phase_start","ts":"2026-11-02 15:32","phase":"testing"}
+{"event":"dispatch","ts":"2026-11-02 15:32","agent":"sdlc-tester"}
+{"event":"user_intervention","ts":"2026-11-02 15:39","reason":"edge-settings"}
