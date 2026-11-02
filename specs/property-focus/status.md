@@ -9,11 +9,11 @@ PR: (none)
 
 - [x] **Planning**
 - [x] **Task Generation**
-- [x] **Implementation**
-- [x] **Testing**
-- [x] **Documentation**
-- [x] **Review**
-- [x] **Wrap-up**
+- [ ] **Implementation**
+- [ ] **Testing**
+- [ ] **Documentation**
+- [ ] **Review**
+- [ ] **Wrap-up**
 - [ ] **PR**
 - [ ] **Archive**
 
@@ -70,3 +70,4 @@ PR: (none)
 - 2026-11-02 14:22 - Deploy decisions recorded in plan/tasks (c9e474f): dogfood manual; AWS merge→staging→checks→auto-promote to production (no human approval as written; awaiting user confirmation)
 - 2026-11-02 14:32 - User asked: replace hand-rolled OIDC/MCP security code with trusted libraries? Research dispatched (explorer + 2 researchers)
 - 2026-11-02 14:40 - User decisions: (1a) adopt PyJWT PyJWKClient + official MCP SDK (mcp 2.3.x low-level Server) in phase 0; (2) AWS WAF + API Gateway throttling for API and MCP in phase 9; (3) per-account app rate limits in phase 5; dogfood behind Cloudflare (DNS already on Cloudflare; Cloudflare Origin CA cert, Full strict, origin firewall to CF IPs). Phase 0 reopened for implementation (Implementation/Testing/Review/Wrap-up rerun scoped to the new tasks).
+- 2026-11-02 14:54 - Plan updated febafea: A5/A6, tasks 0.15-0.17, 5.13, 9.8. Orchestrator call: keep serving cached keys within max age when a JWKS refresh fails (no new 503 behavior). Dispatching 0.15 and 0.17 in parallel.
