@@ -55,3 +55,5 @@ PR: (none)
 - 2026-11-02 07:29 - Fix Once: backend and infra coders dispatched in parallel (disjoint files); P1 repro tester running; frontend coder follows repro
 - 2026-11-02 07:53 - Fix Once complete: c734f96 (web), 6c2fdf5 (backend), bd1eae5 (infra); mechanical fixes machine-verified; make verify green; scoped re-review dispatched
 - 2026-11-02 08:02 - Review round 2: N1 high redaction regression (P10 fix) unresolved → two-round hard cap; escalated to user. Final mechanical checks pass.
+- 2026-11-02 09:03 - User: fix N1 (extra pass authorized); Tier 1 human review by user; task_version = app build
+- 2026-11-02 09:05 - User: P48 yes (Caddy discovery route), P49 accept for dogfood (cleanup before other users)

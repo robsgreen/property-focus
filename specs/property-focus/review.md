@@ -112,3 +112,10 @@ Check: make fe → pass
 Check: make infra → pass
 Check: pnpm lint:md → pass
 Final checks: pass (mechanical); review blocked by unresolved high finding N1 at the two-round hard cap.
+
+## User direction (2026-11-02 09:03)
+- Two-round cap: user authorized one additional targeted fix pass for N1 (plus N2, N3) with a scoped re-review of that change only.
+- Tier 1 gate (MCP wire + OAuth discovery surface): the user will perform the human review personally before release. Recorded; gate satisfied for PR progression (review scheduled with the user, not replaced).
+- P47 resolved by user: `TaskInput.task_version` holds the application build version → rename to `application_version` (bump the TaskInput schema version; no external consumers yet).
+- P48 resolved by user: yes — 2025-03-26 MCP clients should sign in on dogfood; Caddy routes the app host's `/.well-known/oauth-authorization-server` to the realm metadata (added to the extra fix pass).
+- P49 resolved by user: accept the anonymous-registration client-cap risk for dogfood; track it and add automatic cleanup of unused registrations before other users can sign up (carry to phase 5 / wrap-up action items).
