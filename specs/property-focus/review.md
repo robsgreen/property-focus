@@ -146,3 +146,22 @@ No unresolved critical/high or gating-mechanical findings. Tier 1 gate: user wil
 - Sign-in host renamed to `auth-propertyfocus.treb.tech` (first-level, covered by Cloudflare Universal SSL); app host stays `propertyfocus.treb.tech`.
 - Cloudflare Bot Fight Mode: OFF.
 - Initial limits confirmed: Cloudflare 20 req / 10 s per IP on sign-in, registration and /mcp paths; per-account 120/min REST, 60/min MCP (phase 5); AWS WAF 1000 / 5 min per IP, 300 for /mcp (phase 9).
+
+# Review — round 2 work (tasks 0.15–0.17, hostname rename; diff c9e474f..ce7de04)
+Panel: A=claude/opus, B=claude/opus. Mechanical checks on HEAD: make verify → pass; pnpm lint:md → pass; caddy validate → pass; bash -n → pass.
+Contract tier: 1 (MCP wire + OAuth discovery; both seats). Gate: user reviews personally (recorded earlier); the round-2 wire differences are listed in status.md for that review.
+
+## Findings (round 2) — all selected for Fix Once
+- R1 medium, introduced, logic — backend/src/property_focus/adapters/mcp/server.py:307-310: non-CodedError tool exceptions reach the SDK; on initialize-based eras the raw exception message goes on the wire as error code 0 (A; repro: DSN with password returned to client). Escalated (data leak, latent until tools exist).
+- R2 medium, introduced, logic, X — backend/src/property_focus/adapters/auth/oidc.py:110-130: once the key set is expired/unloaded and the issuer is down, every request performs its own fetch serially under the lock (no attempt-based limit); Nth request waits ~N×10 s → client/Cloudflare timeouts instead of prompt 503; IdP hammered (both seats; repros run).
+- R3 medium, introduced, logic — oidc.py:110-115,133: cache-hit path still takes the lock and a to_thread hop; under executor pressure all token checks serialize (B; repro 8 s).
+- R4 medium, introduced, logic — .github/workflows/deploy-dogfood.yml:106-116, infrastructure/dogfood/deploy.sh: workflow overwrites the live origin cert/key before the preflight; a rejected deploy leaves a mismatched pair armed for the next Caddy restart or rollback (A).
+- R5 low, introduced, logic, X — infrastructure/dogfood/Caddyfile:18-22 + FORWARDED_ALLOW_IPS="*": trusting Cloudflare as a proxy passes client-supplied X-Forwarded-For/X-Forwarded-Host through; uvicorn takes the leftmost XFF → forged client IP in app spans and Keycloak events; XFH reaches Keycloak backchannel-dynamic URLs (B repro with real Caddy; A filed as needs-decision). Resolved by orchestrator under A5 ("logs and later limits see the real client IP"): fix with header_up X-Forwarded-For {client_ip} and X-Forwarded-Host {host}.
+- R6 low, introduced, mechanical — SDK logs "Terminating session" at INFO on every stateless request (A).
+- R7 low, introduced, mechanical — identity-and-auth.md:92 states a false reason for the refresh guard (A).
+- R8 low, introduced, mechanical — docs/operations.md:12 omits Caddy's DAC_READ_SEARCH (A).
+## Observations (round 2)
+- O1 firewall.sh assumes the iptables DOCKER-USER chain; Docker's nftables backend is not handled (B gap).
+- O2 Smoke check probes direct origin on IPv4 port 443 only (A).
+- O3 Resolved: OSV batch query on locked versions (mcp 2.3.0, mcp-types 2.3.0, sse-starlette 3.6.0, python-multipart 0.0.33, jsonschema 4.26.0, referencing 0.37.0, rpds-py 2026.9.1, attrs 26.1.0, pyjwt 2.15.1, starlette 1.10.0, uvicorn 0.54.0, httpx2 2.16.0): no known vulnerabilities.
+- Known: header-only era routing (SDK TODO); supportedVersions lists only 2026-07-28; second unsigned decode for scope/exp; empty key set bypasses the unknown-kid limit.
