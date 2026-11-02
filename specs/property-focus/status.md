@@ -32,3 +32,4 @@ PR: (none)
 - 2026-11-02 01:56 - Task Generation complete: 81 tasks, 434 sub-tasks; test plan ~175 items
 - 2026-11-02 02:17 - User chose one PR per phase; implementing Phase 0 (tasks 0.1-0.12) on sdlc/property-focus-p0, based on the planning branch
 - 2026-11-02 02:17 - Phase → Implementation
+- 2026-11-02 02:26 - Task 0.1 complete (make verify green, 24 unit tests); .sdlc links now point at the phase worktree copy

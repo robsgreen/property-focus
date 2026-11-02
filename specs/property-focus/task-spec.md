@@ -1,1 +1,1 @@
-../../../specs/property-focus/tasks/task-spec.md
+/home/user/property-focus-worktrees/property-focus-p0/specs/property-focus/tasks/task-spec.md

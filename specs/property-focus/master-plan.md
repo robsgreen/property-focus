@@ -1,1 +1,1 @@
-../../../specs/property-focus/master-plan.md
+/home/user/property-focus-worktrees/property-focus-p0/specs/property-focus/master-plan.md
