@@ -10,7 +10,7 @@ PR: (none)
 - [x] **Planning**
 - [x] **Task Generation**
 - [x] **Implementation**
-- [ ] **Testing**
+- [x] **Testing**
 - [ ] **Documentation**
 - [ ] **Review**
 - [ ] **Wrap-up**
@@ -46,3 +46,5 @@ PR: (none)
 - 2026-11-02 06:31 - Task 0.11 complete (CI workflow; make verify incl. be-int green)
 - 2026-11-02 06:44 - Phase 0 implementation complete except live gate items 0.12.1 (macOS bootstrap), 0.12.3 (recorded CI run; needs push), 0.12.5 (dogfood smoke; needs CP-0.B + approval) — carried to the PR gate
 - 2026-11-02 06:44 - Phase → Testing (phase 0 scope)
+- 2026-11-02 07:03 - Testing complete (phase 0 scope): test-spec.md all checked; make verify green (333 unit, 149 integration/contract); live TPs pending
+- 2026-11-02 07:03 - Phase → Documentation
