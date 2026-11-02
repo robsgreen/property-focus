@@ -119,3 +119,9 @@ Final checks: pass (mechanical); review blocked by unresolved high finding N1 at
 - P47 resolved by user: `TaskInput.task_version` holds the application build version → rename to `application_version` (bump the TaskInput schema version; no external consumers yet).
 - P48 resolved by user: yes — 2025-03-26 MCP clients should sign in on dogfood; Caddy routes the app host's `/.well-known/oauth-authorization-server` to the realm metadata (added to the extra fix pass).
 - P49 resolved by user: accept the anonymous-registration client-cap risk for dogfood; track it and add automatic cleanup of unused registrations before other users can sign up (carry to phase 5 / wrap-up action items).
+
+## Scoped review of extra pass (c188e47)
+N1 leaks, N2, N3, P47, P48: resolved (reviewer probed 44 shapes; Caddy routing run in docker; no open proxy/host-header injection).
+- N4 high, introduced (6c2fdf5/c188e47), logic — backend/src/property_focus/adapters/telemetry.py:113,119-122,160: redaction regexes do quadratic work on crafted input; Starlette OTel middleware records client-controlled User-Agent/path/query and the redacting span processor runs synchronously on the request path. Reviewer: unauthenticated GET with `User-Agent: "a-"*7000` blocked the event loop 3.1 s. Orchestrator confirmed `redact_text("a-"*7000)` = 2.4 s. UNRESOLVED.
+- N5 low, introduced (6c2fdf5), logic — is_sensitive_key misses `passWord`/`PassWord` after the camelCase split. Observation.
+- Pre-existing notes: quoted values with spaces partly redacted; `_password=x` not redacted; percent-encoded nested `token` passes; SignInFailure retry drops a second rejection.
