@@ -165,3 +165,15 @@ Contract tier: 1 (MCP wire + OAuth discovery; both seats). Gate: user reviews pe
 - O2 Smoke check probes direct origin on IPv4 port 443 only (A).
 - O3 Resolved: OSV batch query on locked versions (mcp 2.3.0, mcp-types 2.3.0, sse-starlette 3.6.0, python-multipart 0.0.33, jsonschema 4.26.0, referencing 0.37.0, rpds-py 2026.9.1, attrs 26.1.0, pyjwt 2.15.1, starlette 1.10.0, uvicorn 0.54.0, httpx2 2.16.0): no known vulnerabilities.
 - Known: header-only era routing (SDK TODO); supportedVersions lists only 2026-07-28; second unsigned decode for scope/exp; empty key set bypasses the unknown-kid limit.
+
+## Scoped re-review of 6e77af1 (round 2 fixes)
+Both seats: R1–R8 resolved, no regressions (storm/flood/outage/rotation/boundary probes; real Caddy runs). Round-2 wire changes for the user's Tier 1 review: unexpected tool failure → -32603 "Internal server error" in all eras; unknown-kid token within 60 s of a failed fetch → 503 (was 401).
+Observations (surfaced at two-round cap; not fixed):
+- S1 low, introduced, logic — oidc.py:158-172: an attempt lasting ≥60 s (slow DNS/trickling response) lets queued waiters start their own fetches (B; probe: 10 fetches).
+- S2 low, introduced, logic — oidc.py:186-196: a malformed JWKS refetch (non-object, no usable keys, client-construction error) replaces the trusted set with an empty one → valid tokens 401 for up to 60 s (A; probe).
+- S3 low, introduced, mechanical — test_auth.py:106-112: the "issuer down" fixture raises CodedError instead of PyJWKClientConnectionError, so fail-fast on real connection errors is unit-untested (A).
+- Optional hardening: `header_up X-Forwarded-Proto https` in the Caddy (forwarded) snippet (both seats judged XFP passthrough acceptable).
+## Final checks (round 2, HEAD 6e77af1)
+Check: make verify → pass (451 unit, 193 integration/contract, fe 33, infra 15 + tsc + synth)
+Final checks: pass
+## Review complete (round 2)

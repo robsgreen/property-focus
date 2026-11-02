@@ -12,8 +12,8 @@ PR: (none)
 - [x] **Implementation**
 - [x] **Testing**
 - [x] **Documentation**
-- [ ] **Review**
-- [ ] **Wrap-up**
+- [x] **Review**
+- [x] **Wrap-up**
 - [ ] **PR**
 - [ ] **Archive**
 
@@ -81,3 +81,5 @@ PR: (none)
 - 2026-11-02 15:52 - Documentation: docs updated (ce7de04) → Phase → Review (round 2 scope c9e474f..HEAD)
 - 2026-11-02 16:00 - Review round 2 consolidated: 0 crit/high, 4 med, 4 low; all selected; fix dispatched
 - 2026-11-02 16:16 - Round 2 fixes 6e77af1 (R1-R8); make verify green (451 unit, 193 int); scoped re-review dispatched
+- 2026-11-02 16:26 - Review round 2 complete; 3 low observations at cap. Phase → Wrap-up (update post-mortem)
+- 2026-11-02 16:29 - Wrap-up (round 2) complete: post-mortem updated (H5/M17/L2, 13 actions); retro round 2 in ce7de04 → PR gate
