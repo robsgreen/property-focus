@@ -1,0 +1,1 @@
+../../../specs/property-focus/master-plan.md
