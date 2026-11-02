@@ -57,3 +57,4 @@ PR: (none)
 - 2026-11-02 08:02 - Review round 2: N1 high redaction regression (P10 fix) unresolved → two-round hard cap; escalated to user. Final mechanical checks pass.
 - 2026-11-02 09:03 - User: fix N1 (extra pass authorized); Tier 1 human review by user; task_version = app build
 - 2026-11-02 09:05 - User: P48 yes (Caddy discovery route), P49 accept for dogfood (cleanup before other users)
+- 2026-11-02 09:07 - CP-0.B answered: dogfood domain propertyfocus.treb.tech (app) + auth.propertyfocus.treb.tech (Keycloak, proposed split, not objected); SMTP relay Mailgun (smtp.mailgun.org:2525; credentials to be set as deployment secrets, not in chat). To record in gate evidence + operations docs after the current fix pass.
