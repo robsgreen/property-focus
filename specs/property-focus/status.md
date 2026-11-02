@@ -10,7 +10,7 @@ PR: (none)
 - [x] **Planning**
 - [x] **Task Generation**
 - [x] **Implementation**
-- [ ] **Testing**
+- [x] **Testing**
 - [ ] **Documentation**
 - [ ] **Review**
 - [ ] **Wrap-up**
@@ -76,3 +76,4 @@ PR: (none)
 - 2026-11-02 15:32 - Task 0.16 complete (0716270; mcp 2.3.0 low-level Server; make verify green). Tier 1 wire differences listed for user review.
 - 2026-11-02 15:32 - Implementation (0.15-0.17) complete → Phase → Testing (TP-0.38-0.50 + gate 0.12.7)
 - 2026-11-02 15:39 - User: rename auth host to auth-propertyfocus.treb.tech; Bot Fight Mode off; limits confirmed (CF 20/10s; 120/60 per min; WAF 1000/300 per 5 min). To apply after the tester finishes (gate file overlap).
+- 2026-11-02 15:42 - Testing round 2 complete (e8f8982, a8035e9; make verify green, 627 backend tests). TP-0.33 wording to amend (-32602 per spec). Dispatching hostname/edge-settings change.

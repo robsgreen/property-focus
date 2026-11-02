@@ -2,7 +2,7 @@
 
 > **Source:** `specs/property-focus/tasks/test-plan.md` (Phase 0: TP-0.1–TP-0.37 and the gate line), `specs/property-focus/tasks/task-spec.md` (tasks 0.1–0.14)
 > **Created:** 2026-11-02
-> **Last Updated:** 2026-11-02
+> **Last Updated:** 2026-11-02 (Round 2 appended)
 
 ## Approach
 
@@ -135,3 +135,84 @@ make verify
 - [x] All integration tests pass (or N/A if not supported)
 - [x] All existing unit tests still pass (no regressions)
 - [x] Build passes
+
+---
+
+## Round 2 (tasks 0.15–0.17)
+
+> **Source:** `test-plan.md` TP-0.33, TP-0.34 (changed), TP-0.38–TP-0.50 (new) and the Foundation gate line; `task-spec.md` tasks 0.15, 0.16, 0.17 and sub-task 0.12.7
+> **Date:** 2026-11-02 — code at `a1fa80a`; new tests `e8f8982`; gate evidence `a8035e9` (branch `sdlc/property-focus-p0`)
+
+### Approach (Round 2)
+
+Most behaviors were already covered by the tests written with the tasks (`unit/test_auth.py`, `unit/test_mcp_adapter.py`, `unit/test_dogfood_edge.py`, the rewritten `contract/test_mcp.py`). New black-box tests were added where a TP item lacked coverage at the adapter boundary against the real Keycloak realm: the unknown-`kid` flood and the `503`/`401` split through both REST and MCP (TP-0.38, TP-0.39), the dependency ranges and lock (TP-0.40), `invalid_input` tool errors in every era (TP-0.45), and a probe of the TP-0.33 "no `_meta` version" case. Live Cloudflare, host-firewall and dogfood items were not run.
+
+### TP Coverage Map (Round 2)
+
+| TP | Proven by | State |
+|---|---|---|
+| TP-0.33 | `contract/test_mcp.py::test_modern_request_with_missing_or_mismatched_header_is_refused` (5 cases, `-32020`), `::test_modern_tool_call_accepts_a_base64_encoded_tool_name`, `::test_modern_request_without_its_meta_envelope_has_invalid_params` (no client capabilities, no `_meta`, **new:** `_meta` without protocol version → `-32602`) | pass, **with a deviation**: a 2026-07-28 header with no `_meta` version gets `-32602` from the SDK, not the `-32020` the TP row lists (see Decisions) |
+| TP-0.34 | `contract/test_mcp.py::test_unsupported_protocol_version_is_refused_with_the_supported_versions` (`2027-01-01`: `400`, `-32022`, `data.supported`, `data.requested`), `::test_methods_2026_07_28_removed_or_not_served_are_not_found[ping/logging/setLevel/resources/list]`; `2024-11-05` moved to TP-0.42 | pass |
+| TP-0.38 | **CT-6** (100 unknown `kid` tokens through REST and MCP: all `401`, ≤1 fetch; mutation with the refetch limit disabled fails it); `unit/test_auth.py::TestKeySet::test_many_unknown_kids_within_a_minute_cause_at_most_one_fetch`, `::test_unknown_kid_refetches_at_most_once_a_minute`, `::test_rotated_in_key_validates_after_one_refetch_and_a_removed_key_fails`; `integration/test_key_rotation.py` (real Keycloak rotation and removal) | pass |
+| TP-0.39 | **CT-7** (key set unreachable, discovery unreachable, discovery naming another issuer → `503` on REST and MCP, no challenge), **CT-8** (provider up: valid token served, tampered `401` on both); `contract/test_mcp.py::test_issuer_outage_gives_503_not_a_challenge`; `unit/test_auth.py::TestAuthenticate::test_rest_answers_a_retryable_503_problem`, `::test_mcp_answers_503_and_still_challenges_an_invalid_token` | pass |
+| TP-0.40 | **CT-9** (`integration/test_security_dependencies.py`: ranges admit/refuse the right versions, `crypto` extra, lock inside range — `mcp` 2.3.0, `pyjwt` 2.15.1) | pass |
+| TP-0.41 | `contract/test_mcp.py::test_unauthenticated_request_gets_a_challenge_naming_the_resource_metadata` (`401` naming `resource_metadata`; the challenge URL, `/.well-known/oauth-protected-resource/mcp` and the root form all name the Keycloak issuer and are equal) | pass |
+| TP-0.42 | `contract/test_mcp.py::test_revision_2024_11_05_is_served_only_with_a_valid_token` | pass |
+| TP-0.43 | `contract/test_mcp.py::test_keycloak_token_without_the_api_audience_is_rejected` (real Keycloak token lacking the audience → `401`, no tenant); `unit/test_mcp_adapter.py::TestConfiguration::test_sdk_resource_check_is_off_because_oidc_checks_the_audience` | pass |
+| TP-0.44 | `contract/test_mcp.py::test_request_from_a_disallowed_host_or_origin_is_rejected_and_runs_no_tool[foreign-origin/foreign-host]`; `unit/test_mcp_adapter.py::TestConfiguration::test_transport_security_allows_exactly_the_configured_hosts_and_origins` | pass |
+| TP-0.45 | **CT-10** (`invalid_input` `{"code","detail"}` in 2025-06-18, 2025-11-25, 2026-07-28); `contract/test_mcp.py::test_parity_harness_compares_rest_and_mcp_results[2025-11-25/2026-07-28]` (`CodedError` `not_found` parity); `unit/test_mcp_adapter.py::TestTools::test_failed_call_is_a_structured_tool_error` | pass |
+| TP-0.46 | `make smoke-dogfood` through Cloudflare; deterministic parts in `unit/test_dogfood_edge.py` (`cf-ray` required, Bot Fight Mode named, direct origin connection must fail) | Det parts: pass. Live: **pending — user action/approval required** (Cloudflare setup, dogfood deploy and smoke) |
+| TP-0.47 | `deploy.sh` preflight on the host; `unit/test_dogfood_edge.py::test_deploy_passes_exactly_the_committed_ranges_to_caddy` (det part) | **pending — user action/approval required** (firewall and deploy on the real host) |
+| TP-0.48 | `unit/test_dogfood_edge.py` (18 cases: origin cert on both sites, no ACME, `trusted_proxies` only from `cloudflare-ips.txt`, `CF-Connecting-IP` first, valid v4/v6 ranges, only Caddy publishes ports over TCP, origin dir read-only) | pass |
+| TP-0.49 | Caddy access log through Cloudflare and a forged `CF-Connecting-IP` on the host | **pending — user action/approval required** (real host) |
+| TP-0.50 | Cloudflare dashboard against the `docs/operations.md` runbook | **pending — user action/approval required** (live Cloudflare dashboard) |
+
+**Foundation gate line (Round 2):** TP-0.33–0.34, TP-0.38–0.45 and TP-0.48 are green locally on the SDK adapter with `PyJWKClient`; TP-0.31, TP-0.32 and TP-0.37 also rerun green on the SDK adapter (`test_mcp.py` both eras, parity, dynamic registration). Still open: TP-0.46, 0.47, 0.49, 0.50 (live Cloudflare/host/dogfood), plus the Round 1 live items TP-0.1, TP-0.6 and TP-0.30, and the user's Tier 1 review of the SDK adapter (0.12.7). TP-0.35/0.36 excluded (deferred). Recorded in `specs/property-focus/gates/foundation-ready.md` (sections 0.12.7 and 0.12.8). Gate stays open.
+
+### Component Tests (Round 2)
+
+- [x] **CT-6** — A flood of 100 tokens naming unknown `kid` values, alternating REST and MCP, is refused with `401` with at most one key-set fetch, and realm tokens keep working (TP-0.38)
+  - File: `backend/tests/contract/test_issuer_failures.py::test_a_flood_of_unknown_key_ids_is_refused_with_at_most_one_key_set_fetch`
+  - Modules exercised: REST app, MCP app, `verifier_for` with a counting `PyJWKClient` on the real Keycloak JWKS, `authenticate`, test database
+- [x] **CT-7** — Unreachable key set, unreachable discovery, and discovery naming another issuer each give `503` (no challenge) on REST and MCP (TP-0.39)
+  - File: `backend/tests/contract/test_issuer_failures.py::test_provider_that_cannot_vouch_for_a_token_gives_503_on_rest_and_mcp` (3 cases)
+  - Modules exercised: REST app, MCP app (SDK transport, `SharedTokenVerifier`, `_RequestScope`), `verifier_for`, `fetch_json`, Keycloak token
+- [x] **CT-8** — With the provider up, a valid token is served and a tampered one gets `401` on both adapters (TP-0.39)
+  - File: `backend/tests/contract/test_issuer_failures.py::test_with_the_provider_up_a_valid_token_is_served_and_an_invalid_one_gets_401`
+  - Modules exercised: REST app, MCP app, verifier, Keycloak
+- [x] **CT-9** — `pyjwt` and `mcp` ranges admit the intended versions and refuse vulnerable/incompatible ones; PyJWT has `crypto`; `uv.lock` resolves inside the ranges (TP-0.40)
+  - File: `backend/tests/integration/test_security_dependencies.py` (5 cases)
+  - Modules exercised: `backend/pyproject.toml`, `uv.lock`, `packaging`
+- [x] **CT-10** — Malformed, missing and null tool arguments give an `isError` result `{"code": "invalid_input", "detail"}` naming the field, in 2025-06-18, 2025-11-25 and 2026-07-28 (TP-0.45)
+  - File: `backend/tests/contract/test_mcp.py::test_invalid_tool_arguments_are_an_invalid_input_tool_error_in_every_era` (9 cases)
+  - Modules exercised: MCP app on the SDK, tool registry, generic client, Keycloak token
+- [x] **CT-11** — A 2026-07-28 request whose `_meta` lacks only the protocol version is refused with `400` (TP-0.33 probe; pins the SDK's `-32602`)
+  - File: `backend/tests/contract/test_mcp.py::test_modern_request_without_its_meta_envelope_has_invalid_params[modern-header-without-meta-protocol-version]`
+  - Modules exercised: MCP app on the SDK, generic client
+
+### Integration Tests (Round 2)
+
+No new integration infrastructure was needed: CT-6–CT-8, CT-10 and CT-11 run against the local Compose Keycloak and Postgres. Existing `integration/test_key_rotation.py` (real Keycloak rotation, IT-1) reruns green on `PyJWKClient`.
+
+### How to Run (Round 2)
+
+```bash
+docker compose up -d --wait postgres keycloak ministack mailpit otel
+uv run pytest backend/tests/contract/test_issuer_failures.py backend/tests/contract/test_mcp.py backend/tests/integration/test_security_dependencies.py -q
+uv run pytest backend/tests/unit/test_auth.py backend/tests/unit/test_mcp_adapter.py backend/tests/unit/test_dogfood_edge.py -q
+make verify
+```
+
+### Results (Round 2)
+
+- In-scope baseline before new tests: 203 passed (unit auth/MCP adapter/dogfood edge/config, all contract, key rotation).
+- New tests: 20 cases (CT-6 1, CT-7 3, CT-8 1, CT-9 5, CT-10 9, CT-11 1), committed in `e8f8982`. CT-6 verified to fail when `REFETCH_INTERVAL_SECONDS` is set to 0 (mutation reverted).
+- **`make verify` at `e8f8982`:** exit 0 — unit 434 passed; integration + contract 193 passed; `be-replay` skipped by design; `check-generated` no diff; web 33; CDK 15 + synth. Verbose backend run: 627 passed, 0 failed, 0 skipped.
+- **Gate 0.12.7** recorded in `a8035e9`: `foundation-ready.md` section 0.12.7 (mcp 2.3.0, PyJWT 2.15.1, `PyJWKClient` adoption, SDK adapter suite, A6 behaviors), new section 0.12.8 (pending), refreshed `make-verify.log` and `backend-tests-verbose.log` (paths `<repo>`, nine planted values redacted; `check_fixture_secrets.py` exit 0; markdown lint clean). The user's Tier 1 review is recorded there as pending.
+
+### Validation (Round 2)
+
+- [x] All component tests pass
+- [x] All integration tests pass
+- [x] All existing unit tests still pass (no regressions)
+- [x] Build passes (`make verify` exit 0)
