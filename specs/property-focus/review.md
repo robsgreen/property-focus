@@ -88,3 +88,27 @@ Severity / origin / class / seats. "X" = raised independently by both seats (cro
 
 ## Panel reproductions
 - P1: reviewer-right — `npx vitest run tests/sign-out.test.tsx` (copy of frontend/) failed 4/4: navigations `["/realms/synthetic/logout","/realms/synthetic/authorize"]`, expected only logout. Regression test passed to the Fix Once coder.
+
+## Fix Once (cycle 1)
+Fix commits: c734f96 (frontend: P1–P4), 6c2fdf5 (backend: P5–P29), bd1eae5 (infrastructure: P30–P42).
+- Mechanical fixes machine-verified: P16 (hide_parameters in engine + migration env), P17 (access_log=False), P18 (no dispose_failure/FailureDisposition left), P22 (guard removed), P36 (no CP-0/Task 5.10 in infra/docs), P39 (.env.example test-live reference gone).
+- P13 partially declined: `duplicate` ERROR_CODE kept — declined: Contract — the plan's stable-code table (master-plan.md:1817) and task spec define it; now documented with one meaning (idempotent replay). Both re-review seats accept the decline.
+
+## Scoped re-review (round 2)
+Seat A: 37/38 in-scope logic findings resolved; P10 regressed (N1). Seat B: all in-scope findings resolved.
+- N1 high, introduced, logic — backend/src/property_focus/adapters/telemetry.py:114,149: the P10 single-rule free-text redaction consumes any `key:value` span, so a sensitive pair after a URL scheme or a `prefix:` is never examined (`https://x/cb?token=t1`, `failed: password=hunter2`, `postgresql://…?password=x` now leak; they were redacted at 616d15e). Seat A ran old vs new side by side; orchestrator re-ran and confirmed. UNRESOLVED — gating at the two-round cap.
+- N2 low, introduced, logic — run_task.py:153-155: runtime_from_settings builds the secret provider twice (extra AWS clients at cold start). Observation (surfaced at two-round cap).
+- N3 low, introduced, logic — frontend/src/app/router.tsx:106: "Sign in again" after a failed sign-out drops a sign-in rejection silently. Observation (surfaced at two-round cap).
+- Seat A gap (not verified): browser back-forward cache could restore "Signing out…" after leaving for the issuer's logout page.
+
+## Final checks
+
+Check: make be-check → pass
+Check: make be-unit → pass
+Check: make be-int → pass
+Check: make be-replay → pass
+Check: make check-generated → pass
+Check: make fe → pass
+Check: make infra → pass
+Check: pnpm lint:md → pass
+Final checks: pass (mechanical); review blocked by unresolved high finding N1 at the two-round hard cap.
