@@ -37,3 +37,4 @@ PR: (none)
 - 2026-11-02 03:06 - Task 0.3 complete (117 unit, 15 integration); A4 Keycloak decision applied to register/plan/tasks (37b3eb1); new Task 0.13
 - 2026-11-02 03:32 - Tasks 0.6 and 0.13 complete (207 unit, 45 integration incl. Keycloak)
 - 2026-11-02 03:48 - Task 0.4 complete (270 unit, 60 integration/contract)
+- 2026-11-02 04:03 - Tasks 0.5 (MCP skeleton) and 0.8 (frontend) complete; make verify green
