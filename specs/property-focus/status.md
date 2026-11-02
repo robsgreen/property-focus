@@ -66,3 +66,5 @@ PR: (none)
 - 2026-11-02 14:10 - Retro: docs/specs/202611/property-focus-phase-0.md (2c65638); docs updated: operations.md (CP-0.B), telemetry.md (N6), gate evidence refreshed at 71694cd
 - 2026-11-02 14:11 - Post-mortem follow-ups carried into plan/tasks (dcd06fd): rls.sql frozen refs, 9.2.1 naming, P49 cleanup 5.10.6-7, Cognito sign-out 9.7.7, P46 5.5.6, P43 2.2.8, resolved decisions
 - 2026-11-02 14:15 - Gate 0.12.4 re-run at HEAD incl. real-browser sign-out (351b6e5). Wrap-up complete → PR gate
+- 2026-11-02 14:18 - User: keep dogfood deploy manual (workflow_dispatch + approval). Future (AWS, phase 9): multi-stage pipeline — deploy to staging first, promote to production automatically only if all automated staging checks pass. Recording in plan phase 9.
+- 2026-11-02 14:22 - Deploy decisions recorded in plan/tasks (c9e474f): dogfood manual; AWS merge→staging→checks→auto-promote to production (no human approval as written; awaiting user confirmation)
