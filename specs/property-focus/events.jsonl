@@ -89,3 +89,5 @@
 {"event":"gate_prompted","ts":"2026-11-03 00:34","gate":"pr"}
 {"event":"gate_confirmed","ts":"2026-11-03 00:34","gate":"pr"}
 {"event":"pr_created","ts":"2026-11-03 00:35","prId":"#2","prUrl":"https://github.com/robsgreen/property-focus/pull/2"}
+{"event":"dispatch","ts":"2026-11-03 17:06","agent":"sdlc-coder"}
+{"event":"post_pr_revision","ts":"2026-11-03 17:37"}

@@ -85,3 +85,5 @@ PR: https://github.com/robsgreen/property-focus/pull/2
 - 2026-11-02 16:29 - Wrap-up (round 2) complete: post-mortem updated (H5/M17/L2, 13 actions); retro round 2 in ce7de04 → PR gate
 - 2026-11-03 00:35 - Squashed to 7a8ed54 (pre-squash history: tag pre-squash-p0 and sdlc-backup branch); pushed sdlc/property-focus-p0; draft PR https://github.com/robsgreen/property-focus/pull/2
 - 2026-11-03 01:55 - PR #2 CI run 41553936987 at 7a8ed54: all 11 jobs green (changes, secret-scan, markdown, backend, integration, replay, generation, frontend, cdk, images, bootstrap). Mergeable: clean. No reviews/comments. Gate 0.12.3 partial (full-run evidence; docs-only path-filter run still pending).
+- 2026-11-03 17:06 - User's macOS make verify: 14 unit failures — BSD paste needs '-' (deploy.sh/tests), and Docker Compose on the Mac rejects configs.content (older Compose). Fix dispatched (revision push to PR #2).
+- 2026-11-03 17:37 - Revision push c8383e9 to PR #2: macOS portability (paste -, stat, LibreSSL checkhost, bash 3.2) + Compose >= 2.27.2 check; make verify green
