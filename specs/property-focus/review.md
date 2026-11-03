@@ -177,3 +177,21 @@ Observations (surfaced at two-round cap; not fixed):
 Check: make verify → pass (451 unit, 193 integration/contract, fe 33, infra 15 + tsc + synth)
 Final checks: pass
 ## Review complete (round 2)
+
+## Post-panel review
+Post-panel review: 2026-11-03 23:51 kept=14 refuted=0 outOfScope=0
+(GitHub review 5761136185 on PR #2 by the owner's account, "Posted via Geordie (Grok Bot)"; each claim checked against source by the orchestrator; user directed: fix all 14, #7 = separate MCP token audience)
+- infrastructure/dogfood/deploy.sh:338 — medium — failed health checks leave the new release's containers running; no automatic rollback
+- .github/workflows/deploy-dogfood.yml:22 — medium — workflow_dispatch deploys any ref
+- .github/workflows/deploy-dogfood.yml:57 — medium — dependency installs share the job that later holds the SSH key/secrets
+- .github/workflows/deploy-dogfood.yml:93 — medium — live env file overwritten before validation
+- infrastructure/dogfood/Caddyfile:52 — medium — origin admitted by shared Cloudflare IP ranges only; needs Authenticated Origin Pulls
+- backend/src/property_focus/adapters/db/rls.sql:81 — medium — users/tenants/event tables readable by pf_runtime without RLS
+- infrastructure/keycloak/realm-property-focus.json:440 — medium — DCR-registered clients get the REST API audience
+- backend/src/property_focus/runtime/run_task.py:225 — medium — task transaction spans the whole handler run
+- backend/src/property_focus/application/workflows.py:488 — medium — outbox publisher holds row locks across launch(); sync DB in async def
+- backend/src/property_focus/adapters/auth/oidc.py:187 — low — malformed JWKS wipes cached keys (= S2)
+- backend/src/property_focus/adapters/auth/oidc.py:304 — low — discovered jwks_uri not required https/issuer host; redirects
+- backend/src/property_focus/adapters/mcp/server.py:24 — low — Host/Origin check after token verification
+- infrastructure/dogfood/compose.yaml:189 — low — FORWARDED_ALLOW_IPS "*"
+- backend/src/property_focus/application/workflows.py:257 — low — idempotency records never expire
