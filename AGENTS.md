@@ -29,7 +29,8 @@ listing, property or search feature exists yet.
   SQLAlchemy 2, Alembic, psycopg, PyJWT, pydantic, OpenTelemetry, boto3; ruff, mypy, pytest
 - Frontend: React 19, React Router 7, Redux Toolkit / RTK Query (OpenAPI codegen),
   oidc-client-ts, Vite, Vitest, ESLint, TypeScript 5.9 (pnpm)
-- Infrastructure: Docker Compose, Keycloak 26.8, Caddy, AWS CDK (TypeScript), GitHub Actions
+- Infrastructure: Docker Compose 2.27.2 or later (`make install` checks), Keycloak 26.8, Caddy,
+  AWS CDK (TypeScript), GitHub Actions
 
 ## Architecture at a Glance
 
@@ -85,7 +86,7 @@ Read the doc for the area you touch, then the source.
 See `README.md` for bootstrap and the full command table. The common ones:
 
 ```sh
-make install          # frozen-lockfile installs
+make install          # Compose version check, frozen-lockfile installs
 make dev              # API :8000, MCP :8001, web :5173, scheduler (development only)
 make be-check be-unit # lint, format, types, boundaries, credential scan, unit tests
 make be-int           # integration and contract tests (Docker and .env)

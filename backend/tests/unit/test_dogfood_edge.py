@@ -12,6 +12,7 @@ import importlib.util
 import ipaddress
 import json
 import re
+import shutil
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -187,21 +188,28 @@ def test_trusted_proxies_and_client_ip_headers_come_only_from_cloudflare() -> No
     assert caddy_environment["PF_CLOUDFLARE_IP_RANGES"].startswith("${PF_CLOUDFLARE_IP_RANGES:?")
 
 
-def test_deploy_passes_exactly_the_committed_ranges_to_caddy() -> None:
+def test_deploy_passes_exactly_the_committed_ranges_to_caddy(tmp_path: Path) -> None:
     script = DEPLOY_SCRIPT.read_text()
     function = re.search(r"^cloudflare_ranges\(\) \{.*\}$", script, re.MULTILINE)
+    assignment = re.search(r"^PF_CLOUDFLARE_IP_RANGES=.*$", script, re.MULTILINE)
     assert function is not None
-    assert "PF_CLOUDFLARE_IP_RANGES=$(cloudflare_ranges | paste -sd ' ')" in script
+    assert assignment is not None
+    bin_dir = write_bsd_tools(tmp_path)
 
     result = subprocess.run(
-        ["bash", "-c", f"{function.group()}\ncloudflare_ranges | paste -sd ' '"],
-        env={"PATH": "/usr/bin:/bin", "dogfood_dir": str(DOGFOOD)},
+        [
+            "bash",
+            "-c",
+            f'{function.group()}\n{assignment.group()}\nprintf %s "$PF_CLOUDFLARE_IP_RANGES"',
+        ],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "dogfood_dir": str(DOGFOOD)},
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
 
-    assert result.stdout.split() == [str(network) for network in cloudflare_networks()]
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split(" ") == [str(network) for network in cloudflare_networks()]
 
 
 def test_cloudflare_ranges_are_valid_networks_of_both_families() -> None:
@@ -284,13 +292,63 @@ def test_smoke_requires_an_ip_address_for_the_origin() -> None:
         smoke.check_origin_unreachable("origin.invalid")
 
 
+# Stand-ins that behave like the macOS (BSD and LibreSSL) tools where those differ from GNU
+# coreutils and OpenSSL, so the tests catch a GNU-only option on any machine: paste reads
+# standard input only with a `-` operand, stat has no -c, and openssl x509 has no -checkhost.
+# Every other use runs the real tool.
+BSD_TOOLS = {
+    "paste": """#!/bin/sh
+operands() {
+	while getopts sd: option; do
+		[ "$option" = "?" ] && return 1
+	done
+	shift $((OPTIND - 1))
+	echo $#
+}
+if [ "$(operands "$@")" = 0 ]; then
+	echo "usage: paste [-s] [-d delimiters] file ..." >&2
+	exit 1
+fi
+exec {real} "$@"
+""",
+    "stat": """#!/bin/sh
+case " $* " in
+*" -c "*) echo "stat: illegal option -- c" >&2; exit 1 ;;
+esac
+exec {real} "$@"
+""",
+    "openssl": """#!/bin/sh
+case " $* " in
+*" -checkhost "*) echo "x509: unknown option -checkhost" >&2; exit 1 ;;
+esac
+exec {real} "$@"
+""",
+}
+
+
+def write_bsd_tools(directory: Path) -> Path:
+    """Write the ``BSD_TOOLS`` stand-ins to ``directory/bsd-bin`` and return that directory,
+    to put first on a ``PATH`` that otherwise holds /usr/bin and /bin."""
+    bin_dir = directory / "bsd-bin"
+    bin_dir.mkdir()
+    for name, template in BSD_TOOLS.items():
+        real = shutil.which(name, path="/usr/bin:/bin")
+        assert real is not None, f"{name} is not in /usr/bin or /bin"
+        path = bin_dir / name
+        path.write_text(template.replace("{real}", real))
+        path.chmod(0o755)
+    return bin_dir
+
+
 APP_HOST = "app.example.test"
 AUTH_HOST = "auth.example.test"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
-# Stands in for Docker: answers `compose config --environment` with the hosts and the smoke
-# user, and fails every other command, so a deploy stops at its first image build.
+# Stands in for Docker: answers `compose version` with the minimum version and
+# `compose config --environment` with the hosts and the smoke user, and fails every other
+# command, so a deploy stops at its first image build.
 DOCKER_STUB = f"""#!/bin/sh
 case "$*" in
+"compose version") echo "Docker Compose version v2.27.2" ;;
 *"config --environment"*)
 	printf 'PF_DOGFOOD_APP_HOST={APP_HOST}\\nPF_DOGFOOD_AUTH_HOST={AUTH_HOST}\\n'
 	printf 'PF_SMOKE_USER_EMAIL=smoke@example.test\\n' ;;
@@ -399,7 +457,7 @@ def deploy_host(tmp_path: Path) -> tuple[OriginPairs, dict[str, str]]:
     pairs = OriginPairs(ca_name, ca_key, origin)
     pairs.write("", *pairs.pair())
     environment = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PATH": f"{bin_dir}:{write_bsd_tools(tmp_path)}:/usr/bin:/bin",
         "PF_DOGFOOD_ENV_FILE": str(env_file),
         "PF_DOGFOOD_RELEASES_DIR": str(tmp_path / "releases"),
         "PF_DOGFOOD_RELEASES_FILE": str(tmp_path / "releases.tsv"),
@@ -477,6 +535,22 @@ def test_deploy_without_a_new_origin_pair_checks_and_keeps_the_live_one(
 
     assert "building images" in result.stdout, result.stdout + result.stderr
     assert pairs.files() == live
+
+
+def test_deploy_refuses_an_old_compose_before_it_changes_anything(
+    deploy_host: tuple[OriginPairs, dict[str, str]],
+) -> None:
+    pairs, environment = deploy_host
+    pairs.write(".new", *pairs.pair())
+    files = pairs.files()
+    docker = Path(environment["PATH"].split(":")[0]) / "docker"
+    docker.write_text(DOCKER_STUB.replace("v2.27.2", "v2.7.0"))
+
+    result = run_deploy(environment)
+
+    assert result.returncode == 1
+    assert "Docker Compose >= 2.27.2 is required, found 2.7.0" in result.stdout, result.stderr
+    assert pairs.files() == files
 
 
 def test_deploy_workflow_writes_only_a_new_origin_pair_for_deploy_sh_to_check() -> None:

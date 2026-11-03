@@ -1,8 +1,11 @@
 # Repository commands. Each target maps to a command set in the task spec and
 # runs from the repository root.
 
-.PHONY: install check-layout be-check be-unit be-int be-replay generate-api check-generated fe \
-	infra deploy-identity verify dev smoke-dogfood compatibility-local
+.PHONY: install check-compose check-layout be-check be-unit be-int be-replay generate-api \
+	check-generated fe infra deploy-identity verify dev smoke-dogfood compatibility-local
+
+# This Makefile's directory, so its scripts are found even when it runs with -f from elsewhere.
+REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Files generated from the backend's REST schema; never edited by hand.
 GENERATED_API := frontend/src/api/openapi.json frontend/src/api/generated.ts
@@ -20,10 +23,15 @@ FORBIDDEN_ROOT_DIRS := apps packages infra evals
 # `uv sync --frozen` installs uv.lock as it is without comparing it to the manifests, so
 # `uv lock --check` first fails when a pyproject.toml changed without its uv.lock update.
 # `pnpm install --frozen-lockfile` already fails on that drift.
-install:
+install: check-compose
 	pnpm install --frozen-lockfile
 	uv lock --check
 	uv sync --all-packages --frozen
+
+# Fails, naming both versions, when the Docker Compose plugin is older than the Compose files
+# and scripts need.
+check-compose:
+	@bash "$(REPO_ROOT)infrastructure/docker/check-compose-version.sh"
 
 # Fails when a forbidden directory exists in the current directory (the repository root).
 check-layout:

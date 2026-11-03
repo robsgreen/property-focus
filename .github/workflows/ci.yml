@@ -49,8 +49,10 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           all_jobs=(backend integration replay generation frontend cdk images bootstrap markdown)
-          declare -A selected
-          select_jobs() { for job in "$@"; do selected[$job]=true; done; }
+          # The selected jobs, space-separated: no associative array, because the integration
+          # tests also run this script with macOS's bash 3.2.
+          selected=" "
+          select_jobs() { selected="$selected$* "; }
 
           if [ "$EVENT_NAME" = pull_request ]; then
             # --no-renames lists both sides of a move, so moving a file out of a path
@@ -79,7 +81,10 @@ jobs:
 
           printf 'Changed files:\n%s\n\nSelected jobs:\n' "${changed:-(not a pull request: all)}"
           for job in "${all_jobs[@]}"; do
-            echo "$job=${selected[$job]:-false}" | tee -a "$GITHUB_OUTPUT"
+            case "$selected" in
+              *" $job "*) echo "$job=true" ;;
+              *) echo "$job=false" ;;
+            esac | tee -a "$GITHUB_OUTPUT"
           done
 
   # Committed files and every file under fixtures/ (recorded email, pages and evidence),

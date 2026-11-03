@@ -35,6 +35,10 @@
 # deploy leaves Caddy's next restart and any rollback on the pair that was live. Without a new
 # pair the preflight checks the live one. Caddy trusts client-IP headers only from the ranges
 # in cloudflare-ips.txt, which this script passes to Compose as PF_CLOUDFLARE_IP_RANGES.
+#
+# The unit tests run this script on developer machines too (macOS among them), so it keeps
+# to commands and options that BSD userland and LibreSSL's openssl also have. Only
+# switch_current's `mv -T`, which the tests never reach, assumes GNU coreutils on the host.
 
 set -euo pipefail
 
@@ -50,6 +54,7 @@ if [[ ${1:-} == --rollback ]]; then
 fi
 [[ $# -eq 1 && $1 =~ ^[0-9a-f]{7,40}$ ]] || usage
 commit=$1
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 env_file=${PF_DOGFOOD_ENV_FILE:-/etc/property-focus/dogfood.env}
 releases_dir=${PF_DOGFOOD_RELEASES_DIR:-/srv/property-focus/releases}
@@ -220,18 +225,36 @@ print("\n".join(result["ipv4_cidrs"] + result["ipv6_cidrs"]))
 # Whether the deploy workflow left a new origin certificate or key to install.
 has_new_origin_pair() { [[ -e $origin_certificate.new || -e $origin_key.new ]]; }
 
+# Whether <certificate> names <host> in its subject alternative names, exactly or through a
+# wildcard (*.example.com) for one leftmost label. Read from `openssl x509 -text`, because
+# LibreSSL's openssl has no -checkhost. Usage: certificate_covers <certificate> <host>.
+certificate_covers() {
+	local host name
+	host=$(tr '[:upper:]' '[:lower:]' <<<"$2")
+	while IFS= read -r name; do
+		[[ $name == "$host" ]] && return 0
+		[[ $name == '*.'* && $host == *.* && ${host%%.*} != '' && ${host#*.} == "${name#*.}" ]] && return 0
+	done < <(openssl x509 -in "$1" -noout -text | awk '
+		names { gsub(/[[:space:]]/, ""); n = split(tolower($0), entries, ",")
+			for (i = 1; i <= n; i++) if (entries[i] ~ /^dns:/) print substr(entries[i], 5)
+			names = 0 }
+		/X509v3 Subject Alternative Name:/ { names = 1 }')
+	return 1
+}
+
 # Fails unless <certificate> and <key> are in place and usable for both hostnames.
 # Usage: check_origin_certificate <certificate> <key>.
 check_origin_certificate() {
 	local certificate=$1 key=$2 host
 	[[ -r $certificate && -r $key ]] || fail "no origin certificate and key at $certificate and $key"
-	[[ $(stat -c %a "$key") == 600 ]] || fail "$key must have mode 600"
+	# find -perm with a plain mode matches exactly those permission bits (POSIX; no stat -c).
+	[[ -n $(find "$key" -prune -perm 600) ]] || fail "$key must have mode 600"
 	openssl verify -CAfile "$origin_ca" "$certificate" >/dev/null ||
 		fail "$certificate is not issued by the Cloudflare Origin CA"
 	openssl x509 -in "$certificate" -noout -checkend $((30 * 24 * 3600)) >/dev/null ||
 		fail "$certificate expires within 30 days; renew it as docs/operations.md says"
 	for host in "$PF_DOGFOOD_APP_HOST" "$PF_DOGFOOD_AUTH_HOST"; do
-		openssl x509 -in "$certificate" -noout -checkhost "$host" | grep -q 'does match' ||
+		certificate_covers "$certificate" "$host" ||
 			fail "$certificate does not cover $host"
 	done
 	[[ $(openssl x509 -in "$certificate" -noout -pubkey) == "$(openssl pkey -in "$key" -pubout)" ]] ||
@@ -258,13 +281,15 @@ install_new_origin_pair() {
 	mv -f "$origin_certificate.new" "$origin_certificate"
 }
 
+compose_problem=$(bash "$script_dir/../docker/check-compose-version.sh" 2>&1) || fail "$compose_problem"
 [[ -f $dogfood_dir/compose.yaml ]] || fail "no release directory $release"
 [[ -f $release/frontend/dist/index.html ]] || fail "$release/frontend/dist has no web app build"
 check_env_file
 # A release from before the Cloudflare edge would serve certificates Caddy can no longer
 # obtain behind the firewall, so neither deploys nor rollbacks accept one.
 [[ -f $dogfood_dir/cloudflare-ips.txt ]] || fail "$release predates the Cloudflare edge"
-PF_CLOUDFLARE_IP_RANGES=$(cloudflare_ranges | paste -sd ' ')
+# The `-` operand reads standard input; BSD paste requires an operand.
+PF_CLOUDFLARE_IP_RANGES=$(cloudflare_ranges | paste -sd ' ' -)
 export PF_CLOUDFLARE_IP_RANGES
 export PF_IMAGE_TAG=$commit
 load_environment

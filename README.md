@@ -22,7 +22,7 @@ Root `apps/`, `packages/`, `infra/` and `evals/` directories are not allowed; `m
 
 - Node.js 22 LTS (22.13 or later) with Corepack (pnpm is pinned in `package.json` as `packageManager`)
 - [uv](https://docs.astral.sh/uv/) 0.11 (installs Python 3.13 when needed)
-- Docker with Compose, and GNU make
+- Docker with the Compose plugin 2.27.2 or later (`docker compose version`; Docker Desktop bundles it), and GNU make. `make install` stops with "Docker Compose >= 2.27.2 is required" on an older one, which would otherwise reject the Compose files' inline `configs` content
 
 ## Bootstrap
 
@@ -58,7 +58,7 @@ publish steps join the bootstrap with the first ontology version (`ontology/v1.0
 
 | Command | What it does |
 |---|---|
-| `make install` | Frozen-lockfile installs for pnpm and uv; fails when a manifest changed without its lockfile (`uv lock --check`) |
+| `make install` | Checks the Compose version (`make check-compose`), then frozen-lockfile installs for pnpm and uv; fails when a manifest changed without its lockfile (`uv lock --check`) |
 | `make check-layout` | Fails on forbidden root directories |
 | `make be-check` | Layout check, `ruff check`, `ruff format --check`, `mypy backend/src`, import-boundary check and credential scan |
 | `make be-unit` | Backend unit tests (`uv run pytest backend/tests/unit -q`) |

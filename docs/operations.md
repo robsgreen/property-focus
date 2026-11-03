@@ -4,7 +4,7 @@ Runbook for the DigitalOcean dogfood environment: one host running `infrastructu
 
 ## The host
 
-The dogfood host runs Docker Engine with a Compose plugin recent enough for `docker compose config --environment`, `python3`, `curl`, `openssl`, `iptables` and `rsync`. It allows inbound traffic only on port 22 and, from Cloudflare's published ranges only, on ports 80 and 443 (see [Cloudflare edge](#cloudflare-edge)). Both public hostnames are proxied by Cloudflare, and Caddy terminates Cloudflare's TLS connections with a Cloudflare Origin CA certificate:
+The dogfood host runs Docker Engine with the Compose plugin 2.27.2 or later, the first with `docker compose config --environment` (`deploy.sh` checks the version first and stops with "Docker Compose >= 2.27.2 is required"), `python3`, `curl`, `openssl`, `iptables` and `rsync`. It allows inbound traffic only on port 22 and, from Cloudflare's published ranges only, on ports 80 and 443 (see [Cloudflare edge](#cloudflare-edge)). Both public hostnames are proxied by Cloudflare, and Caddy terminates Cloudflare's TLS connections with a Cloudflare Origin CA certificate:
 
 - `PF_DOGFOOD_APP_HOST` (`propertyfocus.treb.tech`) serves the web app, the REST API under `/v1`, `/health/*`, the MCP adapter at `/mcp` and its protected-resource metadata. Every other `/.well-known/*` path and `/authorize`, `/register` and `/token` are a `404` there; they belong to the auth host.
 - `PF_DOGFOOD_AUTH_HOST` (`auth-propertyfocus.treb.tech`) serves only the `property-focus` realm's sign-in and protocol paths, `/resources/*` and the realm's authorization-server metadata. Every other path, including `/admin/*` and `/realms/master/*`, is a `404`.
@@ -57,7 +57,7 @@ Operator commands below use this shell function on the host, which runs Compose 
 dogfood_compose() {
   local release=/srv/property-focus/current/infrastructure/dogfood
   PF_IMAGE_TAG=$(basename "$(readlink /srv/property-focus/current)") \
-  PF_CLOUDFLARE_IP_RANGES=$(awk '$1 !~ /^#/ && NF { print $1 }' "$release/cloudflare-ips.txt" | paste -sd ' ') \
+  PF_CLOUDFLARE_IP_RANGES=$(awk '$1 !~ /^#/ && NF { print $1 }' "$release/cloudflare-ips.txt" | paste -sd ' ' -) \
     docker compose --file "$release/compose.yaml" --env-file /etc/property-focus/dogfood.env "$@"
 }
 ```

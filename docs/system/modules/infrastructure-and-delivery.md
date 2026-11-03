@@ -10,6 +10,7 @@ This module covers how the code runs outside a unit test: the local Compose serv
 | `Makefile` | Every repository command ([README](../../../README.md) lists them) |
 | `infrastructure/docker/backend.Dockerfile` | Backend images: `task`, `api`, `mcp`, `scheduler` targets |
 | `infrastructure/docker/keycloak.Dockerfile` | Optimized dogfood Keycloak with the realm file baked in |
+| `infrastructure/docker/check-compose-version.sh` | Fails unless `docker compose` is 2.27.2 or later; run by `make install` and `deploy.sh` |
 | `infrastructure/dogfood/compose.yaml` | The dogfood host's services |
 | `infrastructure/dogfood/Caddyfile` | TLS (Cloudflare Origin CA certificate) and routing for the app host and the auth host |
 | `infrastructure/dogfood/deploy.sh` | Deploy and `--rollback` on the host, with the Cloudflare edge preflight |
@@ -19,7 +20,7 @@ This module covers how the code runs outside a unit test: the local Compose serv
 | `infrastructure/cdk/` | CDK app `@property-focus/infra`: Cognito `IdentityStack` only |
 | `.github/workflows/ci.yml`, `deploy-dogfood.yml` | Pull-request checks; manual dogfood deploy |
 | `backend/scripts/smoke_dogfood.py`, `compatibility_report.py`, `check_fixture_secrets.py`, `check_boundaries.py`, `dev.py` | Supporting scripts |
-| `backend/tests/unit/test_runtime_manifests.py`, `test_dogfood_edge.py`, `test_repo_checks.py`, `integration/test_ci_workflow.py` | Tests for the manifests, the Cloudflare edge configuration, repository checks and CI path filters |
+| `backend/tests/unit/test_runtime_manifests.py`, `test_dogfood_edge.py`, `test_repo_checks.py`, `test_compose_version_check.py`, `integration/test_ci_workflow.py` | Tests for the manifests, the Cloudflare edge configuration, repository checks, the Compose version check and CI path filters |
 
 ## Local services (`compose.yaml`)
 
@@ -104,6 +105,8 @@ The `changes` job maps each changed path to jobs; pushes to `main` and manual ru
 ## Repository checks
 
 - `make check-layout` fails on root `apps/`, `packages/`, `infra/` or `evals/`.
+- `make check-compose` (a prerequisite of `make install`) runs `check-compose-version.sh`, which fails with "Docker Compose >= 2.27.2 is required, found A.B" on an older Compose plugin. 2.27.2 is the first release with `docker compose config --environment`, which `deploy.sh` needs; the inline `configs` content of both Compose files needs 2.23.1. `deploy.sh` runs the same check before anything else on the host.
+- Scripts the unit tests run on a developer machine (`deploy.sh` up to its image build, the CI path filter) use only what macOS also has: BSD `paste`, `find` and `awk`, LibreSSL's `openssl` and bash 3.2. `test_dogfood_edge.py` runs `deploy.sh` with stand-ins that reject the GNU- and OpenSSL-only options (`paste` without an operand, `stat -c`, `openssl x509 -checkhost`).
 - `check_boundaries.py` enforces the layer import rules (see [AGENTS.md](../../../AGENTS.md)).
 - `check_fixture_secrets.py` scans committed files and `fixtures/` for credential patterns; it uses only the standard library.
 - `make compatibility-local` regenerates [compatibility](../../compatibility.md) from MiniStack runs.
