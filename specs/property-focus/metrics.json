@@ -5,10 +5,10 @@
   "harnessVersion": "0.1.0",
   "rubricVersion": "1.0",
   "specName": "property-focus",
-  "generatedAt": "2026-11-02T16:29:34Z",
+  "generatedAt": "2026-11-03T00:35:31Z",
   "specStatus": "in-progress",
   "velocity": {
-    "wallClockMinutes": 898,
+    "wallClockMinutes": 1384,
     "timeToPrMinutes": 764,
     "sessionCount": 1,
     "phaseDurationsMinutes": {
@@ -22,7 +22,7 @@
     }
   },
   "lifecycle": {
-    "furthestPhase": "Wrap-up",
+    "furthestPhase": "PR",
     "stalled": false
   },
   "throughput": {
@@ -31,7 +31,7 @@
     "completionRatio": 0.2193
   },
   "autonomy": {
-    "hardGateInterventions": 5,
+    "hardGateInterventions": 6,
     "resumeCount": 0,
     "reviewFixCycles": 2,
     "subAgentDispatches": 60,
@@ -73,11 +73,15 @@
     "deltaFiles": 158
   },
   "pr": {
-    "prIds": [],
-    "prUrls": []
+    "prIds": [
+      "#2"
+    ],
+    "prUrls": [
+      "https://github.com/robsgreen/property-focus/pull/2"
+    ]
   },
   "parseHealth": {
-    "eventsValid": 88,
+    "eventsValid": 91,
     "eventsMalformed": 0,
     "eventsUnknownType": 0,
     "eventsReviewRounds": 6,

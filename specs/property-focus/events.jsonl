@@ -86,3 +86,6 @@
 {"event":"phase_start","ts":"2026-11-02 16:26","phase":"postMortem"}
 {"event":"dispatch","ts":"2026-11-02 16:26","agent":"sdlc-post-mortem"}
 {"event":"phase_start","ts":"2026-11-02 16:29","phase":"pr"}
+{"event":"gate_prompted","ts":"2026-11-03 00:34","gate":"pr"}
+{"event":"gate_confirmed","ts":"2026-11-03 00:34","gate":"pr"}
+{"event":"pr_created","ts":"2026-11-03 00:35","prId":"#2","prUrl":"https://github.com/robsgreen/property-focus/pull/2"}
