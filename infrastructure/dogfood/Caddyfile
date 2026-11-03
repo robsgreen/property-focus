@@ -1,0 +1,146 @@
+# Dogfood TLS proxy behind Cloudflare (A5). Cloudflare connects with SSL mode Full (strict),
+# so both sites present the Cloudflare Origin CA certificate and key that the deploy workflow
+# writes to /etc/property-focus/origin/ on the host (mounted at /etc/caddy/origin/); Caddy
+# manages no certificates itself. PF_DOGFOOD_APP_HOST and PF_DOGFOOD_AUTH_HOST, the public
+# hostnames of the app and of sign-in, come from the deployment environment.
+#
+# Client IPs: Caddy takes the client's address from CF-Connecting-IP, then X-Forwarded-For,
+# only when the connection comes from a Cloudflare range. PF_CLOUDFLARE_IP_RANGES holds those
+# ranges; deploy.sh reads them from cloudflare-ips.txt, their only source. From any other
+# address both headers are ignored, so a forged header cannot change the logged client IP.
+#
+# reverse_proxy passes the original Host header and Cloudflare's X-Forwarded-Proto through.
+# Because Cloudflare is a trusted proxy, Caddy would also pass on the X-Forwarded-For and
+# X-Forwarded-Host values a client sent through Cloudflare; the forwarded snippet replaces
+# them with the client IP Caddy resolved and the requested host, so the services log the real
+# client IP and the MCP adapter and Keycloak build their public URLs from the host the client
+# actually reached.
+
+{
+	auto_https disable_certs
+	servers {
+		trusted_proxies static {$PF_CLOUDFLARE_IP_RANGES}
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP X-Forwarded-For
+		# Cloudflare reaches the origin over TCP only, so no HTTP/3 listener.
+		protocols h1 h2
+	}
+}
+
+# The forwarded headers every upstream gets, replacing any a client sent.
+(forwarded) {
+	header_up X-Forwarded-For {client_ip}
+	header_up X-Forwarded-Host {host}
+}
+
+# JSON access logs on standard error, for both sites. Each entry records the request's
+# client_ip; Caddy redacts Authorization and Cookie headers itself, and the filter drops the
+# one-time authorization code from sign-in redirects.
+(access_log) {
+	log {
+		output stderr
+		format filter {
+			request>uri query {
+				delete code
+			}
+			wrap json
+		}
+	}
+}
+
+# The application: web app, REST API and MCP adapter.
+{$PF_DOGFOOD_APP_HOST} {
+	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+	import access_log
+	encode zstd gzip
+
+	handle /v1/* {
+		reverse_proxy api:8000 {
+			import forwarded
+		}
+	}
+	# Liveness and readiness, for deploy.sh and the dogfood smoke check.
+	handle /health/* {
+		reverse_proxy api:8000 {
+			import forwarded
+		}
+	}
+	handle /mcp {
+		reverse_proxy mcp:8001 {
+			import forwarded
+		}
+	}
+	# Protected-resource metadata, which names the Keycloak realm as authorization server.
+	handle /.well-known/oauth-protected-resource* {
+		reverse_proxy mcp:8001 {
+			import forwarded
+		}
+	}
+	# Authorization-server metadata at the app host's root, where MCP clients of the
+	# 2025-03-26 protocol look for it: the realm's own metadata, requested as the auth host so
+	# its issuer and endpoints are the public sign-in URLs (Keycloak builds its back-channel
+	# endpoints from the forwarded host).
+	handle /.well-known/oauth-authorization-server {
+		rewrite * /realms/property-focus/.well-known/oauth-authorization-server
+		reverse_proxy keycloak:8080 {
+			header_up Host {$PF_DOGFOOD_AUTH_HOST}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Forwarded-Host {$PF_DOGFOOD_AUTH_HOST}
+		}
+	}
+	# Other well-known metadata and OAuth endpoint paths belong to the auth host. Here they
+	# are a 404, so a client probing the app host never mistakes the web app for metadata.
+	@authorization_paths {
+		path /.well-known/* /authorize /authorize/* /register /register/* /token /token/*
+		not path /.well-known/oauth-protected-resource* /.well-known/oauth-authorization-server
+	}
+	handle @authorization_paths {
+		respond 404
+	}
+	# The single-page web app: unknown paths serve index.html for client-side routes.
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Keycloak: only the property-focus realm's sign-in and protocol endpoints, its static
+# resources and the realm's authorization-server metadata. Everything else, including
+# /admin/* and /realms/master/*, is a 404; operators use an SSH tunnel to the loopback port.
+{$PF_DOGFOOD_AUTH_HOST} {
+	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+	import access_log
+	encode zstd gzip
+
+	@realm path /realms/property-focus /realms/property-focus/*
+	handle @realm {
+		reverse_proxy keycloak:8080 {
+			import forwarded
+		}
+	}
+	handle /resources/* {
+		reverse_proxy keycloak:8080 {
+			import forwarded
+		}
+	}
+	# OAuth authorization-server metadata with the issuer path inserted (RFC 8414), which
+	# Keycloak serves itself.
+	handle /.well-known/oauth-authorization-server/realms/property-focus {
+		reverse_proxy keycloak:8080 {
+			import forwarded
+		}
+	}
+	# OpenID Connect discovery with the issuer path inserted, the one discovery form the MCP
+	# authorization specification names that Keycloak does not serve: map it to the realm's
+	# own discovery document.
+	handle /.well-known/openid-configuration/realms/property-focus {
+		rewrite * /realms/property-focus/.well-known/openid-configuration
+		reverse_proxy keycloak:8080 {
+			import forwarded
+		}
+	}
+	handle {
+		respond 404
+	}
+}

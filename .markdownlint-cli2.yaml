@@ -1,0 +1,19 @@
+# Markdown lint for prose: docs/** and specs/**. Run with `pnpm lint:md`.
+# The rule set keeps structural checks (broken tables, heading order, code spans) and
+# turns off rules that only restate the house style of the specs: unwrapped prose,
+# bold run-in labels, "MUST:" lead-ins directly above lists, unlabeled file-list
+# fences, and register documents with several top-level parts.
+globs:
+  - "docs/**/*.md"
+  - "specs/**/*.md"
+config:
+  default: true
+  MD007:
+    indent: 4      # nested task-spec checklists indent by four spaces
+  MD013: false     # line length: prose is not hard-wrapped
+  MD025: false     # several top-level headings (register amendments, appendices)
+  MD028: false     # consecutive quoted user answers separated by a blank line
+  MD032: false     # a lead-in line directly above a list
+  MD036: false     # bold run-in labels such as **Decision**
+  MD040: false     # fenced file lists without a language
+  MD060: false     # table column alignment style

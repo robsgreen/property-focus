@@ -1,0 +1,11 @@
+# Build context of backend.Dockerfile: only the locked Python workspace, the backend's
+# runtime sources and the scheduler crontab.
+*
+!pyproject.toml
+!uv.lock
+!backend/pyproject.toml
+!backend/alembic.ini
+!backend/migrations/
+!backend/src/
+!infrastructure/dogfood/scheduler.crontab
+**/__pycache__/

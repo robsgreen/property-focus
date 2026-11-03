@@ -1,0 +1,32 @@
+# 0.12.4 PKCE sign-in and sign-out smoke against local Keycloak on make dev, 2026-11-02T14:14:05Z, at dcd06fd
+$ NODE_PATH=/opt/node-tools/node_modules uv run --package property-focus python specs/property-focus/gates/foundation-ready/pkce-smoke.py
+created synthetic user buyer-ba8b2e155dc7@example.test in the local property-focus realm
+web app redirected to Keycloak: http://localhost:8080/realms/property-focus/protocol/openid-connect/auth
+  client_id=property-focus-web
+  redirect_uri=http://localhost:5173/auth/callback
+  response_type=code
+  code_challenge_method=S256
+  code_challenge present: true
+web app exchanged the code: POST /realms/property-focus/protocol/openid-connect/token -> 200 (grant_type=authorization_code, code_verifier present: true)
+web app signed in: http://localhost:5173/ shows "Property Focus" and a Sign out button: true
+access token claims: {"iss":"http://localhost:8080/realms/property-focus","aud":"property-focus-api","azp":"property-focus-web","typ":"Bearer","scope":"openid email profile","email_verified":true}
+ok: GET http://localhost:5173/v1/workflow-runs/{random id} -> authenticated problem 404
+ok: http://127.0.0.1:8001/mcp initialize (requested 2025-11-25) -> protocolVersion 2025-11-25, serverInfo {'name': 'property-focus', 'version': '0.1.0'}; tools/list -> 0 tools
+ok: http://127.0.0.1:8001/mcp server/discover (2026-07-28) -> supportedVersions ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'], resultType 'complete', cacheScope 'private'; tools/list -> 0 tools, no fallback to initialize
+Keycloak sessions for the user before sign-out: 1
+web app sent the browser to Keycloak's end-session endpoint: http://localhost:8080/realms/property-focus/protocol/openid-connect/logout
+  id_token_hint present: true
+  post_logout_redirect_uri=http://localhost:5173/
+  Keycloak answered 302 -> http://localhost:5173/
+after sign-out the browser went:
+  GET http://localhost:8080/realms/property-focus/protocol/openid-connect/logout -> 302
+  GET http://localhost:5173/ -> 200
+  GET http://localhost:8080/realms/property-focus/protocol/openid-connect/auth -> no response (superseded by the next navigation)
+  GET http://localhost:8080/realms/property-focus/protocol/openid-connect/auth -> 200
+after sign-out: http://localhost:8080/realms/property-focus/protocol/openid-connect/auth shows Keycloak's sign-in form (username field visible: true); no token request, no signed-in page
+Keycloak session cookies left in the browser: none
+loading http://localhost:5173/ again: redirected to Keycloak, which shows its sign-in form; no token request, not signed in
+Keycloak sessions for the user after sign-out: 0
+deleted the synthetic user
+pkce-smoke: all checks passed
+[exit 0]

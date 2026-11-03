@@ -1,0 +1,23 @@
+{
+  "name": "@property-focus/infra",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Property Focus AWS infrastructure as a TypeScript CDK app.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "synth": "cdk synth --quiet",
+    "test": "vitest",
+    "diff": "cdk diff"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.275.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "aws-cdk": "2.1147.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  }
+}

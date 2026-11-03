@@ -1,0 +1,25 @@
+# 0.12.2 authorization-server metadata, local Keycloak (image pinned in compose.yaml), 2026-11-02T06:35:08Z
+
+$ curl -sS http://localhost:8080/.well-known/oauth-authorization-server/realms/property-focus | jq '{issuer, registration_endpoint, code_challenge_methods_supported, client_id_metadata_document_supported, has_client_id_metadata_document_supported: has("client_id_metadata_document_supported")}'
+{
+  "issuer": "http://localhost:8080/realms/property-focus",
+  "registration_endpoint": "http://localhost:8080/realms/property-focus/clients-registrations/openid-connect",
+  "code_challenge_methods_supported": [
+    "plain",
+    "S256"
+  ],
+  "client_id_metadata_document_supported": null,
+  "has_client_id_metadata_document_supported": false
+}
+
+$ curl -sS http://localhost:8080/realms/property-focus/.well-known/openid-configuration | jq '{issuer, registration_endpoint, code_challenge_methods_supported, client_id_metadata_document_supported, has_client_id_metadata_document_supported: has("client_id_metadata_document_supported")}'
+{
+  "issuer": "http://localhost:8080/realms/property-focus",
+  "registration_endpoint": "http://localhost:8080/realms/property-focus/clients-registrations/openid-connect",
+  "code_challenge_methods_supported": [
+    "plain",
+    "S256"
+  ],
+  "client_id_metadata_document_supported": null,
+  "has_client_id_metadata_document_supported": false
+}

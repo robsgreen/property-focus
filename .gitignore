@@ -1,0 +1,60 @@
+# Secrets and local configuration. Only the placeholder template is committed.
+.env
+.env.*
+!.env.example
+*.pem
+# Cloudflare's public Origin CA root certificates: public data, no key.
+!infrastructure/dogfood/cloudflare-origin-ca.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets/
+credentials.json
+
+# Browser sessions and profiles (source accounts). Never committed, never logged.
+.browser-profile/
+.browser-profiles/
+browser-profiles/
+playwright/.auth/
+storage-state*.json
+*.storage-state.json
+
+# Local evidence, mailbox captures, backups and private data.
+.local/
+local-evidence/
+evidence-local/
+backups/
+*.eml.private
+*.dump
+
+# Python caches and environments
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# JavaScript caches and build output
+node_modules/
+.pnpm-store/
+coverage/
+playwright-report/
+test-results/
+blob-report/
+*.tsbuildinfo
+.vite/
+cdk.out/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp

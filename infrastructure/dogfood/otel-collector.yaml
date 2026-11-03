@@ -1,0 +1,42 @@
+# Dogfood OpenTelemetry collector (D50). The API, MCP adapter, scheduler and their tasks
+# send OTLP/HTTP to this collector (PF_OTLP_ENDPOINT=http://otel-collector:4318), which
+# forwards traces and metrics to the self-hosted OpenObserve service `observability`.
+# Services redact secrets and personal data before export; logs stay JSON lines on each
+# container's standard error (`docker compose logs`).
+
+extensions:
+  basicauth/observability:
+    client_auth:
+      username: ${env:PF_OBSERVABILITY_ADMIN_EMAIL}
+      password: ${env:PF_OBSERVABILITY_ADMIN_PASSWORD}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch: {}
+
+exporters:
+  otlphttp/observability:
+    endpoint: http://observability:5080/api/default
+    auth:
+      authenticator: basicauth/observability
+
+service:
+  extensions: [basicauth/observability]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/observability]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/observability]

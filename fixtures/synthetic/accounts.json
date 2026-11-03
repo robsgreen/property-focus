@@ -1,0 +1,23 @@
+{
+  "description": "Synthetic users for local development. Each gets one owned account. No credentials: these identities cannot sign in.",
+  "accounts": [
+    {
+      "issuer": "https://fixture-issuer.invalid/realms/property-focus",
+      "subject": "5b0e7c2a-1d4f-4a8e-9c61-2f3b8d7e0a11",
+      "email": "avery.buyer@example.test",
+      "email_verified": true
+    },
+    {
+      "issuer": "https://fixture-issuer.invalid/realms/property-focus",
+      "subject": "8c4d2e19-6a7b-4f30-b2d5-9e1f0c3a4b22",
+      "email": "jordan.investor@example.test",
+      "email_verified": true
+    },
+    {
+      "issuer": "https://fixture-issuer.invalid/realms/property-focus",
+      "subject": "e3f6a8b1-2c9d-4e57-8a04-6b7c1d2e5f33",
+      "email": "riley.partner@example.test",
+      "email_verified": true
+    }
+  ]
+}
