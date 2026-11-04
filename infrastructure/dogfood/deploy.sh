@@ -13,7 +13,10 @@
 # PF_DOGFOOD_ENV_FILE (default /etc/property-focus/dogfood.env) holds the deployment-injected
 # settings and secrets (D49); docs/operations.md lists them and the file's format. Compose
 # is the only parser of that file: this script reads the values it needs through
-# `docker compose config --environment`. Nothing here prints a secret.
+# `docker compose config --environment`. Nothing here prints a secret. The deploy workflow
+# writes a new file beside it (<file>.new); a deploy's preflight reads and checks that one,
+# and only once the whole preflight passes is it moved over the live file, so a rejected
+# deploy leaves the services and any rollback on the live one.
 #
 # A deploy builds the backend and Keycloak images once, tags them with the commit, records
 # their digests in releases.tsv, and promotes exactly those images: the migration task, the
@@ -23,6 +26,9 @@
 # the web app, the Caddyfile and the collector configuration of the earlier release. It never
 # reverses a migration (migrations follow expand/contract) and leaves Keycloak, its database
 # and the realm as they are, because Keycloak cannot run an older version on a newer database.
+# A deploy that fails once it has started the new release's services rolls back by itself:
+# it runs `deploy.sh --rollback` of the release `current` names, or, without an earlier
+# release, stops the application services and Caddy (undo_failed_start).
 #
 # Cloudflare edge (A5): before a deploy changes anything, it checks that the release's
 # cloudflare-ips.txt equals Cloudflare's published ranges, that the live firewall is exactly
@@ -35,10 +41,16 @@
 # deploy leaves Caddy's next restart and any rollback on the pair that was live. Without a new
 # pair the preflight checks the live one. Caddy trusts client-IP headers only from the ranges
 # in cloudflare-ips.txt, which this script passes to Compose as PF_CLOUDFLARE_IP_RANGES.
+# Caddy also requires a client certificate (Authenticated Origin Pulls): one from Cloudflare's
+# origin-pull CA, cloudflare-origin-pull-ca.pem, which the preflight checks has more than 30
+# days left, or this host's own health-check certificate, which this script creates in
+# PF_DOGFOOD_ORIGIN_DIR and presents in its health checks; those also check that a client
+# without a certificate is refused.
 #
 # The unit tests run this script on developer machines too (macOS among them), so it keeps
 # to commands and options that BSD userland and LibreSSL's openssl also have. Only
-# switch_current's `mv -T`, which the tests never reach, assumes GNU coreutils on the host.
+# switch_current's `mv -T` assumes GNU coreutils on the host; the one test that reaches it,
+# a whole successful deploy, runs only where `mv` is GNU's.
 
 set -euo pipefail
 
@@ -56,7 +68,14 @@ fi
 commit=$1
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-env_file=${PF_DOGFOOD_ENV_FILE:-/etc/property-focus/dogfood.env}
+live_env_file=${PF_DOGFOOD_ENV_FILE:-/etc/property-focus/dogfood.env}
+# The environment file this run reads: on a deploy, the new one the workflow wrote beside the
+# live file (<file>.new) when there is one, until install_new_environment_file moves it over
+# the live file; otherwise, and on every rollback, the live file.
+env_file=$live_env_file
+if [[ $mode == deploy && -e $live_env_file.new ]]; then
+	env_file=$live_env_file.new
+fi
 releases_dir=${PF_DOGFOOD_RELEASES_DIR:-/srv/property-focus/releases}
 release=$releases_dir/$commit
 dogfood_dir=$release/infrastructure/dogfood
@@ -66,6 +85,11 @@ origin_ca=$dogfood_dir/cloudflare-origin-ca.pem
 origin_dir=${PF_DOGFOOD_ORIGIN_DIR:-/etc/property-focus/origin}
 origin_certificate=$origin_dir/cert.pem
 origin_key=$origin_dir/key.pem
+# Cloudflare's Authenticated Origin Pulls CA, whose client certificate Caddy requires, and the
+# host's own client certificate, which Caddy also trusts, for the health checks on loopback.
+origin_pull_ca=$dogfood_dir/cloudflare-origin-pull-ca.pem
+health_check_certificate=$origin_dir/health-check-cert.pem
+health_check_key=$origin_dir/health-check-key.pem
 current=$(dirname "$releases_dir")/current
 digests=${PF_DOGFOOD_RELEASES_FILE:-/var/lib/property-focus/releases.tsv}
 # Images this repository builds: property-focus-<name>:<commit>.
@@ -138,9 +162,26 @@ expect_status() {
 	done
 }
 
+# The curl options of a request to this host's Caddy: Caddy must present an origin
+# certificate from the Cloudflare Origin CA, and the request presents the health-check client
+# certificate.
+caddy_client=(--cacert "$origin_ca" --cert "$health_check_certificate" --key "$health_check_key")
+
 # A public HTTPS request sent to this host's Caddy, which must present an origin certificate
-# for the hostname from the Cloudflare Origin CA. Usage: expect_public <status> <host> <path>.
-expect_public() { expect_status "$1" "https://$2$3" --resolve "$2:443:127.0.0.1" --cacert "$origin_ca"; }
+# for the hostname. Usage: expect_public <status> <host> <path>.
+expect_public() { expect_status "$1" "https://$2$3" --resolve "$2:443:127.0.0.1" "${caddy_client[@]}"; }
+
+# Fails unless Caddy refuses a request for <host> that presents no client certificate during
+# the TLS handshake, which curl reports as exit code 35 (handshake) or 56 (the alert TLS 1.3
+# sends after it), as Authenticated Origin Pulls requires.
+# Usage: expect_client_certificate_required <host>.
+expect_client_certificate_required() {
+	local code=0
+	curl --silent --output /dev/null --max-time 10 --resolve "$1:443:127.0.0.1" --cacert "$origin_ca" \
+		"https://$1/" || code=$?
+	[[ $code == 35 || $code == 56 ]] ||
+		fail "Caddy accepted a client without a trusted client certificate on $1 (curl exit code $code); both sites must require one (Caddyfile, origin_tls)"
+}
 
 # Fails unless the JSON document the app host serves at <path> names the realm on the public
 # auth host, the PF_OIDC_ISSUER the services verify tokens against, in its <field>: a string,
@@ -149,7 +190,7 @@ expect_app_host_issuer() {
 	local path=$1 field=$2
 	local expected="https://$PF_DOGFOOD_AUTH_HOST/realms/property-focus" issuer
 	expect_public 200 "$PF_DOGFOOD_APP_HOST" "$path"
-	issuer=$(curl --silent --fail --resolve "$PF_DOGFOOD_APP_HOST:443:127.0.0.1" --cacert "$origin_ca" \
+	issuer=$(curl --silent --fail --resolve "$PF_DOGFOOD_APP_HOST:443:127.0.0.1" "${caddy_client[@]}" \
 		"https://$PF_DOGFOOD_APP_HOST$path" |
 		python3 -c '
 import json, sys
@@ -162,6 +203,8 @@ print(value[0] if isinstance(value, list) and value else value)
 health_checks() {
 	log "health checks through Caddy and on loopback"
 	expect_public 200 "$PF_DOGFOOD_APP_HOST" /health/ready
+	expect_client_certificate_required "$PF_DOGFOOD_APP_HOST"
+	expect_client_certificate_required "$PF_DOGFOOD_AUTH_HOST"
 	# Protected-resource metadata, in the MCP SDK's path-inserted form and the root form.
 	expect_app_host_issuer /.well-known/oauth-protected-resource/mcp authorization_servers
 	expect_app_host_issuer /.well-known/oauth-protected-resource authorization_servers
@@ -177,10 +220,56 @@ health_checks() {
 	expect_status 200 http://127.0.0.1:5080/healthz
 }
 
+# Creates the health-check client certificate and key when they are missing or the
+# certificate expires within 30 days: self-signed, so Caddy, which trusts this certificate
+# itself, admits exactly the holder of the key, which never leaves this host (mode 600).
+ensure_health_check_client() {
+	if [[ -r $health_check_key ]] &&
+		openssl x509 -in "$health_check_certificate" -noout -checkend $((30 * 24 * 3600)) >/dev/null 2>&1; then
+		return 0
+	fi
+	log "creating the health-check client certificate"
+	(
+		umask 077
+		openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=property-focus dogfood health check" \
+			-keyout "$health_check_key.new" -out "$health_check_certificate.new" 2>/dev/null
+	) || fail "cannot create the health-check client certificate in $origin_dir"
+	chmod 644 "$health_check_certificate.new"
+	mv -f "$health_check_key.new" "$health_check_key"
+	mv -f "$health_check_certificate.new" "$health_check_certificate"
+}
+
 # Recreates Caddy and the collector, whose configuration files are single-file bind mounts
 # that a running container never rereads. Caddy also rereads the origin certificate.
 recreate_proxy_and_collector() {
 	compose up --detach --wait --no-build --no-deps --force-recreate caddy otel-collector
+}
+
+# The release `current` names while this deploy runs (empty when there is none): the one a
+# deploy that fails after starting its services hands the host back to.
+previous_commit=$(readlink "$current" 2>/dev/null || true)
+previous_commit=${previous_commit##*/}
+
+# The EXIT trap of a deploy from the moment it starts the new release's services until
+# `current` points at that release. When the deploy fails there, it runs the release `current`
+# names again through that release's own `deploy.sh --rollback`; with no earlier release
+# (a first deploy, or a redeploy of the commit `current` names, whose images the build has
+# retagged) it stops the application services and Caddy instead, so no release that failed
+# its checks keeps serving. Migrations stay, as on every rollback (expand/contract). Exits
+# with the deploy's status.
+undo_failed_start() {
+	local status=$?
+	trap - EXIT
+	if [[ -n $previous_commit && $previous_commit != "$commit" ]]; then
+		log "rolling back to $previous_commit, the release current names"
+		"$releases_dir/$previous_commit/infrastructure/dogfood/deploy.sh" --rollback "$previous_commit" ||
+			log "FAILED: the automatic rollback to $previous_commit failed; roll back by hand (docs/operations.md, Rollback)"
+	else
+		log "no earlier release to roll back to; stopping ${application_services[*]} and caddy"
+		compose stop "${application_services[@]}" caddy ||
+			log "FAILED: cannot stop ${application_services[*]} and caddy"
+	fi
+	exit "$status"
 }
 
 # Points `current` at this release, atomically.
@@ -261,10 +350,19 @@ check_origin_certificate() {
 		fail "$key is not the key of $certificate"
 }
 
+# Fails unless the committed Authenticated Origin Pulls CA is a certificate with more than 30
+# days left.
+check_origin_pull_ca() {
+	openssl x509 -in "$origin_pull_ca" -noout >/dev/null 2>&1 || fail "$origin_pull_ca is not a certificate"
+	openssl x509 -in "$origin_pull_ca" -noout -checkend $((30 * 24 * 3600)) >/dev/null ||
+		fail "$origin_pull_ca expires within 30 days; refresh it as docs/operations.md says"
+}
+
 edge_preflight() {
-	log "checking the Cloudflare edge: published ranges, firewall, origin certificate"
+	log "checking the Cloudflare edge: published ranges, firewall, origin certificate, origin-pull CA"
 	check_published_ranges
 	"$dogfood_dir/firewall.sh" --check
+	check_origin_pull_ca
 	if has_new_origin_pair; then
 		check_origin_certificate "$origin_certificate.new" "$origin_key.new"
 	else
@@ -279,6 +377,16 @@ install_new_origin_pair() {
 	log "installing the new origin certificate and key"
 	mv -f "$origin_key.new" "$origin_key"
 	mv -f "$origin_certificate.new" "$origin_certificate"
+}
+
+# Moves the new environment file, which the whole preflight read and accepted, over the live
+# one (an atomic rename), so a rejected deploy leaves the live file to the services and to any
+# rollback. From here on this run reads the live file, which now holds the same values.
+install_new_environment_file() {
+	[[ $env_file == "$live_env_file.new" ]] || return 0
+	log "installing the new environment file"
+	mv -f "$env_file" "$live_env_file"
+	env_file=$live_env_file
 }
 
 compose_problem=$(bash "$script_dir/../docker/check-compose-version.sh" 2>&1) || fail "$compose_problem"
@@ -299,6 +407,7 @@ load_environment
 if [[ $mode == rollback ]]; then
 	log "rolling the application back to $commit"
 	verify_recorded_digests "${application_services[@]}"
+	ensure_health_check_client
 	compose up --detach --wait --no-build --no-deps "${application_services[@]}"
 	recreate_proxy_and_collector
 	health_checks
@@ -309,6 +418,7 @@ fi
 
 : "${PF_SMOKE_USER_EMAIL:?set PF_SMOKE_USER_EMAIL in $env_file}"
 edge_preflight
+install_new_environment_file
 install_new_origin_pair
 
 log "building images for $commit once"
@@ -337,8 +447,11 @@ realm ensure-user --email "$PF_SMOKE_USER_EMAIL"
 
 log "starting the application and the proxy"
 verify_recorded_digests "${built_images[@]}"
+ensure_health_check_client
+trap undo_failed_start EXIT
 compose up --detach --wait --no-build --remove-orphans
 recreate_proxy_and_collector
 health_checks
 switch_current
+trap - EXIT
 log "deployed $commit"

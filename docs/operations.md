@@ -9,15 +9,18 @@ The dogfood host runs Docker Engine with the Compose plugin 2.27.2 or later, the
 - `PF_DOGFOOD_APP_HOST` (`propertyfocus.treb.tech`) serves the web app, the REST API under `/v1`, `/health/*`, the MCP adapter at `/mcp` and its protected-resource metadata. Every other `/.well-known/*` path and `/authorize`, `/register` and `/token` are a `404` there; they belong to the auth host.
 - `PF_DOGFOOD_AUTH_HOST` (`auth-propertyfocus.treb.tech`) serves only the `property-focus` realm's sign-in and protocol paths, `/resources/*` and the realm's authorization-server metadata. Every other path, including `/admin/*` and `/realms/master/*`, is a `404`.
 
-Keycloak's HTTP port (8080) and management port (9000) and the OpenObserve UI (5080) bind to the host's loopback interface only. Postgres, the API, the MCP adapter and the collector publish no ports at all. Every container runs with `no-new-privileges` and without Linux capabilities, except those Postgres needs to prepare its data directory, and Caddy's `NET_BIND_SERVICE` (ports 80 and 443) and `DAC_READ_SEARCH` (to read the origin key, which belongs to the deploy user with mode 600); Keycloak (1.5 GB), Postgres (1 GB) and OpenObserve (1 GB) have memory limits, so the host needs at least 4 GB.
+Keycloak's HTTP port (8080) and management port (9000) and the OpenObserve UI (5080) bind to the host's loopback interface only. Postgres, the API, the MCP adapter and the collector publish no ports at all. Caddy reaches the API, the MCP adapter and Keycloak over the Compose network `proxy` (`10.250.10.0/28`), the only one it joins, from the fixed address `10.250.10.2`; the API and MCP adapter trust `X-Forwarded-Proto` and `X-Forwarded-For` only from that address (uvicorn's `FORWARDED_ALLOW_IPS`). If that subnet collides with a network on the host, change the subnet and the `x-caddy-address` value together in `infrastructure/dogfood/compose.yaml`. Every container runs with `no-new-privileges` and without Linux capabilities, except those Postgres needs to prepare its data directory, and Caddy's `NET_BIND_SERVICE` (ports 80 and 443) and `DAC_READ_SEARCH` (to read the origin key, which belongs to the deploy user with mode 600); Keycloak (1.5 GB), Postgres (1 GB) and OpenObserve (1 GB) have memory limits, so the host needs at least 4 GB.
 
 One-time setup by an operator:
 
 1. Create a `deploy` user in the `docker` group whose `authorized_keys` holds the public half of the `DOGFOOD_SSH_PRIVATE_KEY` deployment key.
 2. Create `/srv/property-focus/releases`, `/etc/property-focus` (mode 700) and `/var/lib/property-focus`, all owned by `deploy`.
-3. Put Cloudflare in front of both hostnames as [Cloudflare edge](#cloudflare-edge) describes: proxied DNS records, SSL mode Full (strict), the Origin CA certificate, the host firewall and the dashboard's security settings. Caddy obtains no certificates of its own, so the origin certificate must be stored before the first deploy.
+3. Put Cloudflare in front of both hostnames as [Cloudflare edge](#cloudflare-edge) describes: proxied DNS records, SSL mode Full (strict), the Origin CA certificate, Authenticated Origin Pulls (on before the first deploy), the host firewall and the dashboard's security settings. Caddy obtains no certificates of its own, so the origin certificate must be stored before the first deploy.
 4. Set up the SMTP relay (see [Mail relay](#mail-relay)): add and verify the sending domain in Mailgun, and create its SMTP credentials.
-5. Configure the `dogfood` GitHub environment as the header of `.github/workflows/deploy-dogfood.yml` describes: the variables `PF_DOGFOOD_APP_HOST=propertyfocus.treb.tech`, `PF_DOGFOOD_AUTH_HOST=auth-propertyfocus.treb.tech` and `PF_DOGFOOD_ORIGIN_ADDRESS` (the host's public IP address), and the secrets, including `DOGFOOD_ENV_FILE`, `DOGFOOD_ORIGIN_CERT` and `DOGFOOD_ORIGIN_KEY`.
+5. Configure GitHub as the header of `.github/workflows/deploy-dogfood.yml` describes:
+    - **Repository variables** (Settings > Secrets and variables > Actions > Variables), read by all three jobs, the build job among them, which runs outside any environment: `PF_DOGFOOD_APP_HOST=propertyfocus.treb.tech`, `PF_DOGFOOD_AUTH_HOST=auth-propertyfocus.treb.tech`, `PF_SMOKE_USER_EMAIL` and `PF_DOGFOOD_ORIGIN_ADDRESS` (the host's public IP address). Delete any copies of these from the `dogfood` environment, where they would override the repository values for the deploy job only.
+    - **Environment `dogfood`** (Settings > Environments): required reviewers; under **Deployment branches and tags**, **Selected branches and tags** with the single rule `main`, so no other ref can reach its secrets even if the workflow's `if: github.ref == 'refs/heads/main'` were removed; the variables `DOGFOOD_SSH_TARGET` and `DOGFOOD_SSH_KNOWN_HOSTS`; the secrets `DOGFOOD_SSH_PRIVATE_KEY`, `DOGFOOD_ENV_FILE`, `PF_SMOKE_USER_PASSWORD`, `DOGFOOD_ORIGIN_CERT` and `DOGFOOD_ORIGIN_KEY`.
+    - **Environment `dogfood-smoke`**: no required reviewers (it runs right after the approved deploy), the same `main`-only deployment branch rule, and only the secret `PF_SMOKE_USER_PASSWORD`, with the same value as in `dogfood`; change both when you change the smoke user's password.
 
 ### Mail relay
 
@@ -31,7 +34,7 @@ The relay credentials live only in the `dogfood` GitHub environment's `DOGFOOD_E
 
 ## Environment file
 
-`/etc/property-focus/dogfood.env` holds the deployment-injected settings and secrets (D49), one `KEY=value` per line. The deploy workflow rewrites it on every deploy from the `DOGFOOD_ENV_FILE` secret plus the hostnames and smoke-user values; nothing in Git, an image, the realm file or a log holds these values.
+`/etc/property-focus/dogfood.env` holds the deployment-injected settings and secrets (D49), one `KEY=value` per line. On every deploy the workflow writes a new file beside it, `/etc/property-focus/dogfood.env.new` (mode 600), from the `DOGFOOD_ENV_FILE` secret plus the hostnames and smoke-user values; `deploy.sh` checks the new file in its preflight and moves it over the live one only once the whole preflight passes (see [Deploy](#deploy)). Nothing in Git, an image, the realm file or a log holds these values.
 
 Docker Compose is the only program that parses the file: `deploy.sh` and the operator commands below pass it with `--env-file`, and `deploy.sh` reads the values it needs itself through `docker compose config --environment`. Write each value bare, or in single quotes when it holds `$`, a quote, a backslash, `#` or a space: `PF_KEYCLOAK_SMTP_PASSWORD='pa$$word'` is read as `pa$$word`, but unquoted Compose would treat `$$` and `$word` as substitutions. A single-quoted value cannot hold a single quote. `deploy.sh` refuses a file that breaks these rules, naming the line and key but never the value.
 
@@ -64,15 +67,22 @@ dogfood_compose() {
 
 ## Deploy
 
-Run the `deploy-dogfood` workflow from GitHub Actions; its `dogfood` environment's reviewers approve the job. The workflow builds the web app with the dogfood issuer, copies the commit and its web build to a new release directory `/srv/property-focus/releases/<commit>`, writes the environment file and the new origin certificate and key beside the live pair (`/etc/property-focus/origin/cert.pem.new` and `key.pem.new`, the key with mode 600), runs that release's `infrastructure/dogfood/deploy.sh <commit>` on the host, removes its SSH key, and then runs `make smoke-dogfood` from the runner, outside the host and through Cloudflare. The running release's files, web build included, stay untouched until step 6.
+Run the `deploy-dogfood` workflow from GitHub Actions on `main`; it deploys nothing from any other ref. It runs three jobs, so that no dependency install shares a job with the SSH key or the environment file's secrets:
 
-`deploy.sh` first checks the environment file's format and then, before it changes anything, the Cloudflare edge. It fails when:
+1. `build`, with no environment and no secrets, installs the web app's dependencies, builds it with the dogfood issuer and uploads the commit's tree with `frontend/dist` as the `release` artifact.
+2. `deploy`, once the `dogfood` environment's reviewers approve it, installs nothing: it downloads the artifact, copies it to a new release directory `/srv/property-focus/releases/<commit>`, writes the new environment file (`/etc/property-focus/dogfood.env.new`) and the new origin certificate and key beside the live pair (`/etc/property-focus/origin/cert.pem.new` and `key.pem.new`, the key with mode 600), runs that release's `infrastructure/dogfood/deploy.sh <commit>` on the host and removes its SSH key.
+3. `smoke`, in the `dogfood-smoke` environment, which holds only the smoke user's password, installs the backend and runs `make smoke-dogfood` from the runner, outside the host and through Cloudflare.
+
+The running release's files, web build included, stay untouched until step 6 below.
+
+`deploy.sh` first checks the environment file's format (the new file when the workflow wrote one, otherwise the live one) and reads it through Compose, and then, before it changes anything, the Cloudflare edge. It fails when:
 
 - the release's `cloudflare-ips.txt` differs from Cloudflare's published lists (`https://api.cloudflare.com/client/v4/ips`); it prints the difference;
 - the live firewall is not exactly what `firewall.sh` applies, so ports 80 or 443 could be reached from outside Cloudflare (`firewall.sh --check`, which reads the rules through the deploy user's `sudo` rule);
+- the release's `cloudflare-origin-pull-ca.pem` (see [Authenticated Origin Pulls](#authenticated-origin-pulls)) is not a certificate or expires within 30 days;
 - the origin certificate or key is missing, the key's mode is not 600, the certificate is not issued by the Cloudflare Origin CA, does not cover both hostnames, does not match the key, or expires within 30 days. It checks the new pair the workflow wrote (`cert.pem.new`, `key.pem.new`), or the live pair when there is none.
 
-Only once all of these pass does it move the new pair over the live `cert.pem` and `key.pem`. A deploy the preflight rejects leaves the live pair as it was, so Caddy's next restart and any rollback still serve the certificate that was live; the rejected files stay beside it until the next deploy writes new ones.
+Only once all of these pass does it move the new environment file over `/etc/property-focus/dogfood.env` and the new pair over the live `cert.pem` and `key.pem`, each with an atomic rename. A deploy the preflight rejects leaves the live environment file and pair as they were, so the running services, Caddy's next restart and any rollback still use what was live; the rejected files stay beside them until the next deploy writes new ones.
 
 Then it stops at the first failing step:
 
@@ -81,8 +91,10 @@ Then it stops at the first failing step:
 3. Starts Postgres and runs `db-init`, which creates missing roles and databases and sets their passwords from the environment file.
 4. Runs `migrate` as one controlled task.
 5. Starts Keycloak, which imports the realm on first start, then runs `keycloak_realm.py apply` and `check` over the loopback port, and `ensure-user` for the smoke user.
-6. Checks that every tag still carries its recorded digest, starts the API, MCP adapter, scheduler, Caddy and the observability stack from the new release, recreates Caddy and the collector so they read this release's Caddyfile, collector configuration, web build and the origin certificate, and waits for their health checks.
-7. Requests, on the host's loopback address and verifying the origin certificate against `cloudflare-origin-ca.pem`, readiness, the protected-resource metadata, the web app and both realm discovery forms through Caddy, checks that the app host's `/.well-known/oauth-authorization-server` (for 2025-03-26 MCP clients) names the realm on the auth host as its issuer, confirms `/.well-known/openid-configuration` on the app host and `/admin/` and `/realms/master/` on the auth host answer `404`, checks OpenObserve on loopback, and only then points the `/srv/property-focus/current` symlink at the new release.
+6. Checks that every tag still carries its recorded digest, creates the health-check client certificate when it is missing or expires within 30 days (`/etc/property-focus/origin/health-check-cert.pem` and `health-check-key.pem`, the key with mode 600), starts the API, MCP adapter, scheduler, Caddy and the observability stack from the new release, recreates Caddy and the collector so they read this release's Caddyfile, collector configuration, web build and the origin certificate, and waits for their health checks.
+7. Requests, on the host's loopback address, verifying the origin certificate against `cloudflare-origin-ca.pem` and presenting the health-check client certificate, readiness; checks that both hostnames refuse a client without a certificate during the TLS handshake; requests the protected-resource metadata, the web app and both realm discovery forms through Caddy, checks that the app host's `/.well-known/oauth-authorization-server` (for 2025-03-26 MCP clients) names the realm on the auth host as its issuer, confirms `/.well-known/openid-configuration` on the app host and `/admin/` and `/realms/master/` on the auth host answer `404`, checks OpenObserve on loopback, and only then points the `/srv/property-focus/current` symlink at the new release.
+
+If anything fails from step 6 on, once the new release's services may be running, `deploy.sh` rolls back by itself before it exits with the failure: it runs `deploy.sh --rollback <commit>` of the release `/srv/property-focus/current` names (see [Rollback](#rollback)), so that release's application, Caddyfile, collector configuration and web build serve again and `current` keeps pointing at it. The migration from step 4 stays. On a first deploy, or a redeploy of the commit `current` already names (whose images the build retagged), there is no earlier release to return to: it stops `api`, `mcp`, `scheduler` and `caddy` instead, so a release that failed its checks never keeps serving. When the automatic rollback itself fails, the log says so; roll back by hand. A failure before step 6 changes no running service, so nothing is rolled back.
 
 Migrations must stay expand/contract: a release may add columns and tables, and removes what the previous release still reads only in a later release. That keeps every rollback below safe without reversing a migration.
 
@@ -104,7 +116,9 @@ It does not restore:
 
 - the database schema: migrations are never reversed, which is why they must stay expand/contract;
 - Keycloak: its image, its own database and the realm stay as the newer release left them, because Keycloak cannot run an older version on a database a newer one migrated. Do not run `dogfood_compose up keycloak` after a rollback; the next deploy brings Keycloak in line again;
-- the environment file, which the workflow rewrites on every deploy.
+- the environment file, which only a deploy's preflight replaces.
+
+A deploy that fails after starting its services runs this same rollback by itself (see [Deploy](#deploy)).
 
 `--rollback` also refuses a release from before the Cloudflare edge (one without `infrastructure/dogfood/cloudflare-ips.txt`): its Caddy would try to obtain certificates the firewall no longer lets it get. Unlike a deploy, a rollback skips the edge preflight, so a Cloudflare API outage cannot block it.
 
@@ -131,6 +145,22 @@ Sign-in was first planned at the second-level `auth.propertyfocus.treb.tech`, wh
 1. **SSL/TLS > Origin Server > Create Certificate:** choose "Generate private key and CSR with Cloudflare" (RSA is the default key type; ECC also works), list exactly `propertyfocus.treb.tech` and `auth-propertyfocus.treb.tech` (replace the default apex and `*.treb.tech` entries: the certificate names only the two dogfood hosts, and `deploy.sh` refuses one that does not cover both), choose the validity, and create it.
 2. Choose the PEM key format. Copy the certificate into the `dogfood` GitHub environment secret `DOGFOOD_ORIGIN_CERT` and the private key into `DOGFOOD_ORIGIN_KEY`. Cloudflare shows the key only on this screen; never store it anywhere else.
 3. The next deploy writes both to `/etc/property-focus/origin/` as `cert.pem.new` and `key.pem.new`, checks them, and installs them over the live pair once its preflight passes. `infrastructure/dogfood/cloudflare-origin-ca.pem` holds Cloudflare's public Origin CA roots (RSA and ECC), against which `deploy.sh` verifies the certificate.
+
+### Authenticated Origin Pulls
+
+The firewall admits every Cloudflare range, which any Cloudflare customer's traffic also comes from, so Caddy also requires Cloudflare's origin-pull client certificate (A5). Cloudflare's current documentation calls this **global** Authenticated Origin Pulls: Cloudflare presents one client certificate, shared by all Cloudflare zones, issued by the CA in `infrastructure/dogfood/cloudflare-origin-pull-ca.pem` ([Global AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/)). It proves a connection comes from Cloudflare's network, not from this zone; Cloudflare's zone-level and per-hostname modes, with a certificate of our own, would prove the zone too.
+
+Both sites complete a TLS handshake only with a client that presents a certificate from that CA, or the host's own health-check certificate, which `deploy.sh` creates beside the origin pair and presents in its loopback health checks. Every other client fails the handshake (`tlsv13 alert certificate required`).
+
+Order matters, because Cloudflare sends its client certificate only when the origin asks for one, and Caddy asks only from the release that requires it:
+
+1. **SSL/TLS > Origin Server > Authenticated Origin Pulls** tab, **Global** section: switch the toggle to **On**. The running Caddy, which does not ask for a client certificate, keeps serving as before.
+2. Deploy the release whose Caddyfile requires the certificate. From then on Caddy asks, and Cloudflare presents it.
+3. Confirm with `make smoke-dogfood` (the workflow's `smoke` job). If Cloudflare does not present the certificate, the origin refuses its handshake, Cloudflare answers `525`, and the smoke check names this setting.
+
+Deploying first and switching the toggle on later breaks all traffic in between (`525`). To turn it off, do the reverse: roll back or deploy a release without the requirement first, then switch the toggle off.
+
+`cloudflare-origin-pull-ca.pem` is valid until 2029-11-01; `deploy.sh` refuses to deploy within 30 days of that. Cloudflare announces a replacement certificate in advance: put the new CA beside the old one in the file (Caddy trusts every certificate in it) and deploy before Cloudflare switches, then remove the old one. Record the source URL, fetch date and SHA-256 fingerprint in the file's header; Cloudflare publishes no fingerprint, so compare the download with the copy in `github.com/cloudflare/cloudflare-docs` (`public/ssl/static/authenticated_origin_pull_ca.pem`), as on 2026-11-03.
 
 ### Host firewall
 
@@ -208,6 +238,7 @@ Checked 2026-11-02:
 
 - Published ranges: <https://www.cloudflare.com/ips-v4>, <https://www.cloudflare.com/ips-v6>, <https://api.cloudflare.com/client/v4/ips>
 - Origin CA certificates and root downloads: <https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/> (`origin_ca_rsa_root.pem`, `origin_ca_ecc_root.pem`)
+- Global Authenticated Origin Pulls and its CA (checked 2026-11-03): <https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/>, <https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem>
 - Universal SSL coverage: <https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/>
 - Always Use HTTPS: <https://developers.cloudflare.com/ssl/edge-certificates/additional-options/always-use-https/>
 - Managed rules on the Free plan: <https://developers.cloudflare.com/waf/managed-rules/>, <https://developers.cloudflare.com/waf/get-started/>
@@ -267,6 +298,14 @@ MCP clients register themselves, and registration stops at `PF_KEYCLOAK_MAX_CLIE
 1. In the console (`property-focus` realm, Clients), list clients with generated IDs; these are the dynamically registered ones. The realm's own clients (`property-focus-web` and the built-in ones) are never pruned.
 2. Check each candidate's Sessions tab; delete clients with no sessions that their users no longer need. Users of a deleted client register again on their next sign-in.
 3. `keycloak_realm.py apply` never deletes clients, so pruning is always this manual step.
+
+## Database
+
+What operators see when they work on the dogfood database directly (`dogfood_compose exec postgres psql ...`); [database and tenancy](system/modules/database-and-tenancy.md) has the detail.
+
+- **Row security covers identity and events.** Since migration 0002, `users`, `tenants`, `domain_events`, `outbox_events` and `processed_events` have forced row-level security, like the tenant-private tables. A runtime session (`pf_runtime`) sees no rows of them until it sets a scope: `SET pf.service_scope = on` for every row, or a tenant scope. To read rows without one, use the backup role (`pf_backup`, whose login needs `BYPASSRLS`); the maintenance role `pf_maintenance` runs `VACUUM`, `ANALYZE`, `REINDEX` and `CLUSTER` but reads no rows. Sign-in creates users and tenants only through `pf_provision_account()`, a `SECURITY DEFINER` function that only `pf_runtime` may execute; do not insert those rows by hand.
+- **Idle transactions are ended.** Runtime connections set `idle_in_transaction_session_timeout` to one minute: the server terminates a session left idle inside a transaction that long and releases its locks. The application sets it on its own connections; a `psql` session you open is not affected.
+- **Idempotency records expire.** A request's idempotency key replays for 24 hours. The scheduled `repair` task (every 5 minutes) also deletes expired records, up to 1000 per pass, so the table stays bounded without manual pruning.
 
 ## Observability
 

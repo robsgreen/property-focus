@@ -34,6 +34,11 @@ x-hardening: &hardening
   cap_drop:
     - ALL
 
+# Caddy's fixed address on the proxy network, the only network it joins: the one address the
+# API and MCP adapter trust forwarded headers from (FORWARDED_ALLOW_IPS). Change it with the
+# subnet under networks.proxy if that subnet collides with one on the host.
+x-caddy-address: &caddy-address 10.250.10.2
+
 x-backend-build: &backend-build
   context: ../..
   dockerfile: infrastructure/docker/backend.Dockerfile
@@ -155,6 +160,7 @@ services:
       PF_KEYCLOAK_SMTP_PASSWORD: ${PF_KEYCLOAK_SMTP_PASSWORD:-}
       PF_KEYCLOAK_SMTP_STARTTLS: ${PF_KEYCLOAK_SMTP_STARTTLS:-true}
       PF_KEYCLOAK_SMTP_SSL: ${PF_KEYCLOAK_SMTP_SSL:-false}
+    networks: [default, proxy]
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:9000:9000"
@@ -172,8 +178,8 @@ services:
       retries: 30
     logging: *logging
 
-  # The REST API. Only Caddy reaches it (no published port), so uvicorn may trust the
-  # forwarded scheme from any address on the Compose network.
+  # The REST API. Only Caddy reaches it (no published port), and uvicorn trusts the forwarded
+  # scheme and client address only from Caddy's fixed address.
   api:
     <<: *hardening
     build:
@@ -186,7 +192,8 @@ services:
         condition: service_healthy
     environment:
       <<: *backend-environment
-      FORWARDED_ALLOW_IPS: "*"
+      FORWARDED_ALLOW_IPS: *caddy-address
+    networks: [default, proxy]
     command: [python, -m, property_focus.cli, serve, api, --host, 0.0.0.0]
     init: true
     logging: *logging
@@ -206,10 +213,11 @@ services:
         condition: service_healthy
     environment:
       <<: *backend-environment
-      FORWARDED_ALLOW_IPS: "*"
+      FORWARDED_ALLOW_IPS: *caddy-address
       PF_MCP_PUBLIC_URL: https://${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}/mcp
       PF_MCP_ALLOWED_HOSTS: ${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}
       PF_MCP_ALLOWED_ORIGINS: https://${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}
+    networks: [default, proxy]
     command: [python, -m, property_focus.cli, serve, mcp, --host, 0.0.0.0]
     init: true
     logging: *logging
@@ -256,9 +264,16 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    networks:
+      proxy:
+        ipv4_address: *caddy-address
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # The Cloudflare Origin CA certificate and key, written by the deploy workflow.
+      # Cloudflare's Authenticated Origin Pulls CA, which issues the client certificate
+      # Cloudflare presents.
+      - ./cloudflare-origin-pull-ca.pem:/etc/caddy/cloudflare-origin-pull-ca.pem:ro
+      # The Cloudflare Origin CA certificate and key, written by the deploy workflow, and
+      # deploy.sh's health-check client certificate.
       - /etc/property-focus/origin:/etc/caddy/origin:ro
       - ../../frontend/dist:/srv/web:ro
       - caddy-data:/data
@@ -329,6 +344,14 @@ configs:
       SELECT 'CREATE DATABASE keycloak OWNER keycloak'
       WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')
       \gexec
+
+# Caddy reaches the API, the MCP adapter and Keycloak over `proxy` only, from its fixed
+# address; every other service talks over `default`.
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: 10.250.10.0/28
 
 volumes:
   postgres-data:

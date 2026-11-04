@@ -3,8 +3,9 @@
 .env.*
 !.env.example
 *.pem
-# Cloudflare's public Origin CA root certificates: public data, no key.
+# Cloudflare's public Origin CA roots and Authenticated Origin Pulls CA: public data, no key.
 !infrastructure/dogfood/cloudflare-origin-ca.pem
+!infrastructure/dogfood/cloudflare-origin-pull-ca.pem
 *.key
 *.p12
 *.pfx

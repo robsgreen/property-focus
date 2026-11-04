@@ -1,22 +1,32 @@
 # Deploys the dogfood environment to its DigitalOcean host with
 # infrastructure/dogfood/deploy.sh, then runs the dogfood smoke check from outside the host,
 # through Cloudflare (A5).
-# Runs only when started by hand, and only after the protected `dogfood` GitHub
-# environment's required reviewers approve the job. Dogfood needs no cloud account (A4).
+# Runs only when started by hand on main, and only after the protected `dogfood` GitHub
+# environment's required reviewers approve the deploy job. Dogfood needs no cloud account (A4).
 #
-# Repository setup this workflow expects, on the `dogfood` environment (docs/operations.md):
-# - required reviewers;
-# - variables DOGFOOD_SSH_TARGET (deploy user@host), DOGFOOD_SSH_KNOWN_HOSTS (the host's
-#   public key line), PF_DOGFOOD_APP_HOST and PF_DOGFOOD_AUTH_HOST (the public hostnames of
-#   the app and of sign-in), PF_SMOKE_USER_EMAIL and PF_DOGFOOD_ORIGIN_ADDRESS (the host's
-#   public IP address, which the smoke check expects to refuse direct connections);
-# - secrets DOGFOOD_SSH_PRIVATE_KEY, DOGFOOD_ENV_FILE (the host's environment file, without
-#   the values above), PF_SMOKE_USER_PASSWORD, and DOGFOOD_ORIGIN_CERT and DOGFOOD_ORIGIN_KEY
-#   (the Cloudflare Origin CA certificate for both hostnames and its private key, in PEM).
+# Three jobs keep every dependency install away from the deploy secrets:
+# - build (no environment, no secrets) installs the web app's dependencies, builds it for
+#   dogfood and uploads this commit's tree with frontend/dist as the `release` artifact;
+# - deploy (environment `dogfood`) installs nothing: it downloads that artifact, copies it to
+#   the host, writes the environment file and origin pair beside the live ones (<file>.new)
+#   and runs deploy.sh, which checks them before it installs them;
+# - smoke (environment `dogfood-smoke`, which holds only the smoke user's password) installs
+#   the backend and runs `make smoke-dogfood`, with neither the SSH key nor DOGFOOD_* secrets.
 #
-# Actions are pinned by commit; the comment names the release each commit is. The SSH key is
-# written only after every third-party action and dependency install has run, and removed
-# right after the deploy step, whatever its outcome.
+# Repository setup this workflow expects (docs/operations.md, The host):
+# - repository variables PF_DOGFOOD_APP_HOST and PF_DOGFOOD_AUTH_HOST (the public hostnames
+#   of the app and of sign-in), PF_SMOKE_USER_EMAIL and PF_DOGFOOD_ORIGIN_ADDRESS (the
+#   host's public IP address, which the smoke check expects to refuse direct connections);
+# - environment `dogfood`: required reviewers, deployment branch `main` only, variables
+#   DOGFOOD_SSH_TARGET (deploy user@host) and DOGFOOD_SSH_KNOWN_HOSTS (the host's public key
+#   line), and secrets DOGFOOD_SSH_PRIVATE_KEY, DOGFOOD_ENV_FILE (the host's environment file,
+#   without the values above), PF_SMOKE_USER_PASSWORD, and DOGFOOD_ORIGIN_CERT and
+#   DOGFOOD_ORIGIN_KEY (the Cloudflare Origin CA certificate for both hostnames and its
+#   private key, in PEM);
+# - environment `dogfood-smoke`: deployment branch `main` only, secret PF_SMOKE_USER_PASSWORD.
+#
+# Actions are pinned by commit; the comment names the release each commit is. The deploy job
+# removes its SSH key right after the deploy step, whatever its outcome.
 name: deploy-dogfood
 
 on:
@@ -30,18 +40,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  # Needs nothing secret: the hostnames are public repository variables.
+  build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: dogfood
-    timeout-minutes: 45
-    env:
-      PF_DOGFOOD_APP_HOST: ${{ vars.PF_DOGFOOD_APP_HOST }}
-      PF_DOGFOOD_AUTH_HOST: ${{ vars.PF_DOGFOOD_AUTH_HOST }}
-      PF_SMOKE_USER_EMAIL: ${{ vars.PF_SMOKE_USER_EMAIL }}
-      PF_DOGFOOD_ORIGIN_ADDRESS: ${{ vars.PF_DOGFOOD_ORIGIN_ADDRESS }}
-      DOGFOOD_SSH_TARGET: ${{ vars.DOGFOOD_SSH_TARGET }}
-      # Where the host keeps one release directory per commit; deploy.sh runs from it.
-      DOGFOOD_RELEASE: /srv/property-focus/releases/${{ github.sha }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -63,12 +66,42 @@ jobs:
           PF_WEB_OIDC_CLIENT_ID: property-focus-web
         run: pnpm --filter @property-focus/web build
 
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-        with:
-          version: "0.11.x"
+      # A tarball keeps the scripts' executable bits, which the artifact's zip would drop.
+      - name: Package this commit and its web build
+        run: >-
+          tar --create --gzip --file "$RUNNER_TEMP/release.tar.gz"
+          --exclude=.git --exclude=node_modules --exclude=.venv .
 
-      - name: Install the backend for the smoke check
-        run: uv sync --all-packages --frozen
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}/release.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dogfood
+    timeout-minutes: 45
+    env:
+      PF_DOGFOOD_APP_HOST: ${{ vars.PF_DOGFOOD_APP_HOST }}
+      PF_DOGFOOD_AUTH_HOST: ${{ vars.PF_DOGFOOD_AUTH_HOST }}
+      PF_SMOKE_USER_EMAIL: ${{ vars.PF_SMOKE_USER_EMAIL }}
+      DOGFOOD_SSH_TARGET: ${{ vars.DOGFOOD_SSH_TARGET }}
+      # Where the host keeps one release directory per commit; deploy.sh runs from it.
+      DOGFOOD_RELEASE: /srv/property-focus/releases/${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}
+
+      - name: Unpack the release
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          tar --extract --gzip --file "$RUNNER_TEMP/release.tar.gz" --directory "$RUNNER_TEMP/release"
 
       - name: Configure SSH to the dogfood host
         env:
@@ -83,14 +116,13 @@ jobs:
       # A new directory per commit: the running release keeps its files, web build included,
       # until deploy.sh switches to this one.
       - name: Copy this commit and its web build to its release directory on the host
-        run: |
-          rsync --archive --compress --delete \
-            --exclude .git --exclude node_modules --exclude .venv \
-            ./ "$DOGFOOD_SSH_TARGET:$DOGFOOD_RELEASE/"
+        run: rsync --archive --compress --delete "$RUNNER_TEMP/release/" "$DOGFOOD_SSH_TARGET:$DOGFOOD_RELEASE/"
 
       # The smoke password is single-quoted, as the file format requires for values that may
-      # hold $ (docs/operations.md); deploy.sh refuses a value it cannot read exactly.
-      - name: Write the host's environment file
+      # hold $ (docs/operations.md). The file goes beside the live one as dogfood.env.new;
+      # deploy.sh checks it in its preflight and moves it over the live file only once the
+      # preflight passes, so a rejected deploy leaves the live file as it was.
+      - name: Write the new environment file
         env:
           DOGFOOD_ENV_FILE: ${{ secrets.DOGFOOD_ENV_FILE }}
           PF_SMOKE_USER_PASSWORD: ${{ secrets.PF_SMOKE_USER_PASSWORD }}
@@ -101,7 +133,7 @@ jobs:
             printf 'PF_DOGFOOD_AUTH_HOST=%s\n' "$PF_DOGFOOD_AUTH_HOST"
             printf 'PF_SMOKE_USER_EMAIL=%s\n' "$PF_SMOKE_USER_EMAIL"
             printf "PF_SMOKE_USER_PASSWORD='%s'\n" "$PF_SMOKE_USER_PASSWORD"
-          } | ssh "$DOGFOOD_SSH_TARGET" 'umask 077 && cat > /etc/property-focus/dogfood.env'
+          } | ssh "$DOGFOOD_SSH_TARGET" 'umask 077 && cat > /etc/property-focus/dogfood.env.new'
 
       # Caddy serves this certificate on both hostnames; Cloudflare verifies it (Full
       # (strict)). The pair goes beside the live one as cert.pem.new and key.pem.new; deploy.sh
@@ -127,7 +159,29 @@ jobs:
         if: always()
         run: rm -f ~/.ssh/id_ed25519
 
+  # Installs the backend for the smoke check, so it runs without the deploy job's secrets.
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: dogfood-smoke
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install the backend for the smoke check
+        run: uv sync --all-packages --frozen
+
       - name: Smoke-check dogfood from outside the host
         env:
+          PF_DOGFOOD_APP_HOST: ${{ vars.PF_DOGFOOD_APP_HOST }}
+          PF_DOGFOOD_AUTH_HOST: ${{ vars.PF_DOGFOOD_AUTH_HOST }}
+          PF_SMOKE_USER_EMAIL: ${{ vars.PF_SMOKE_USER_EMAIL }}
+          PF_DOGFOOD_ORIGIN_ADDRESS: ${{ vars.PF_DOGFOOD_ORIGIN_ADDRESS }}
           PF_SMOKE_USER_PASSWORD: ${{ secrets.PF_SMOKE_USER_PASSWORD }}
         run: make smoke-dogfood

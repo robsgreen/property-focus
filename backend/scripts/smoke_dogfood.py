@@ -15,7 +15,12 @@ order, printing one line each and stopping at the first failure:
    2026-07-28 path.
 
 Every response the checks read themselves, and every MCP response, must carry Cloudflare's
-``cf-ray`` header and must not be a Cloudflare challenge page. A challenge fails the check
+``cf-ray`` header and must not be a Cloudflare challenge page. A ``525`` (Cloudflare could not
+complete the TLS handshake with the origin) fails with a message naming Authenticated Origin
+Pulls: the origin requires Cloudflare's client certificate, which Cloudflare sends only while
+that setting is on. The origin's refusal of a client without that certificate cannot be
+checked from here, because the firewall drops direct connections first; ``deploy.sh`` checks it
+on the host. A challenge fails the check
 with a message naming Bot Fight Mode, which challenges automated clients such as this one
 and MCP clients; the sign-in's responses, read by the shared sign-in client, are checked
 for a challenge page when the sign-in fails.
@@ -60,6 +65,13 @@ ORIGIN_CONNECT_TIMEOUT_SECONDS = 5.0
 # A challenge page's body loads Cloudflare's challenge script from this path. It identifies a
 # challenge where only the body is known: the failure message of the shared sign-in client.
 _CHALLENGE_SCRIPT_PATH = "/cdn-cgi/challenge-platform/"
+# Cloudflare's status for a TLS handshake with the origin that failed.
+_ORIGIN_HANDSHAKE_FAILED = 525
+_ORIGIN_PULLS_HINT = (
+    "Cloudflare could not complete the TLS handshake with the origin (525). The origin requires "
+    "Cloudflare's client certificate, so Authenticated Origin Pulls must be on: check SSL/TLS > "
+    "Origin Server > Authenticated Origin Pulls (docs/operations.md, Authenticated Origin Pulls)"
+)
 _BOT_FIGHT_MODE_HINT = (
     "Cloudflare answered with a challenge page. Bot Fight Mode (or another Cloudflare "
     "challenge) is challenging automated clients; Bot Fight Mode must stay off, so check "
@@ -96,9 +108,13 @@ def expect_through_cloudflare(url: str, headers: _Headers) -> None:
 
 
 def edge_request(method: str, url: str, bearer: str | None = None) -> Response:
-    """One request that must come back through Cloudflare (``expect_through_cloudflare``)."""
+    """One request that must come back through Cloudflare (``expect_through_cloudflare``)
+    from an origin Cloudflare could reach; a ``525`` raises ``SmokeCheckError`` naming
+    Authenticated Origin Pulls."""
     response = Browser().request(method, url, bearer=bearer)
     expect_through_cloudflare(url, response.headers)
+    if response.status == _ORIGIN_HANDSHAKE_FAILED:
+        raise SmokeCheckError(f"{url}: {_ORIGIN_PULLS_HINT}")
     return response
 
 

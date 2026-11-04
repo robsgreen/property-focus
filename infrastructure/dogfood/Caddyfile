@@ -4,6 +4,13 @@
 # manages no certificates itself. PF_DOGFOOD_APP_HOST and PF_DOGFOOD_AUTH_HOST, the public
 # hostnames of the app and of sign-in, come from the deployment environment.
 #
+# Authenticated Origin Pulls: both sites complete a TLS handshake only with a client that
+# presents a certificate from Cloudflare's origin-pull CA (cloudflare-origin-pull-ca.pem,
+# mounted from the release), which Cloudflare sends once the zone's global Authenticated
+# Origin Pulls setting is on, or the host's own health-check certificate, which deploy.sh
+# creates beside the origin pair and presents on loopback. Anyone else reaching the origin,
+# past the firewall or from another Cloudflare range, fails the handshake.
+#
 # Client IPs: Caddy takes the client's address from CF-Connecting-IP, then X-Forwarded-For,
 # only when the connection comes from a Cloudflare range. PF_CLOUDFLARE_IP_RANGES holds those
 # ranges; deploy.sh reads them from cloudflare-ips.txt, their only source. From any other
@@ -24,6 +31,16 @@
 		client_ip_headers CF-Connecting-IP X-Forwarded-For
 		# Cloudflare reaches the origin over TCP only, so no HTTP/3 listener.
 		protocols h1 h2
+	}
+}
+
+# The origin certificate, and the client certificate every connection must present.
+(origin_tls) {
+	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem {
+		client_auth {
+			mode require_and_verify
+			trust_pool file /etc/caddy/cloudflare-origin-pull-ca.pem /etc/caddy/origin/health-check-cert.pem
+		}
 	}
 }
 
@@ -50,7 +67,7 @@
 
 # The application: web app, REST API and MCP adapter.
 {$PF_DOGFOOD_APP_HOST} {
-	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+	import origin_tls
 	import access_log
 	encode zstd gzip
 
@@ -109,7 +126,7 @@
 # resources and the realm's authorization-server metadata. Everything else, including
 # /admin/* and /realms/master/*, is a 404; operators use an SSH tunnel to the loopback port.
 {$PF_DOGFOOD_AUTH_HOST} {
-	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+	import origin_tls
 	import access_log
 	encode zstd gzip
 
