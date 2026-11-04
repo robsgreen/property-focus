@@ -16,7 +16,10 @@
 # `docker compose config --environment`. Nothing here prints a secret. The deploy workflow
 # writes a new file beside it (<file>.new); a deploy's preflight reads and checks that one,
 # and only once the whole preflight passes is it moved over the live file, so a rejected
-# deploy leaves the services and any rollback on the live one.
+# deploy leaves the services and any rollback on the live one. The file it replaces is kept
+# as <file>.previous (mode 600); an automatic rollback restores it, with the database
+# passwords db-init has already set from the new file, and sets the new one aside as
+# <file>.failed (mode 600).
 #
 # A deploy builds the backend and Keycloak images once, tags them with the commit, records
 # their digests in releases.tsv, and promotes exactly those images: the migration task, the
@@ -27,8 +30,11 @@
 # reverses a migration (migrations follow expand/contract) and leaves Keycloak, its database
 # and the realm as they are, because Keycloak cannot run an older version on a newer database.
 # A deploy that fails once it has started the new release's services rolls back by itself:
-# it runs `deploy.sh --rollback` of the release `current` names, or, without an earlier
-# release, stops the application services and Caddy (undo_failed_start).
+# it runs `deploy.sh --rollback` of the release `current` names (or, when that is the commit
+# being deployed, of the newest other release `current` named, from current-history.tsv
+# beside releases.tsv), or, without such a release, stops the application services and Caddy
+# (undo_failed_start). Neither a deploy nor a rollback accepts a release from before Caddy's
+# reserved address on the proxy network (release_problem): see docs/operations.md, Rollback.
 #
 # Cloudflare edge (A5): before a deploy changes anything, it checks that the release's
 # cloudflare-ips.txt equals Cloudflare's published ranges, that the live firewall is exactly
@@ -92,6 +98,11 @@ health_check_certificate=$origin_dir/health-check-cert.pem
 health_check_key=$origin_dir/health-check-key.pem
 current=$(dirname "$releases_dir")/current
 digests=${PF_DOGFOOD_RELEASES_FILE:-/var/lib/property-focus/releases.tsv}
+# One line per switch of `current` (time, commit), oldest first: the releases that passed
+# their health checks, which releases.tsv (every build, failed deploys included) cannot tell.
+current_history=$(dirname "$digests")/current-history.tsv
+# The passwords db-init sets in Postgres from the environment file on every deploy.
+database_password_keys=(PF_MIGRATION_DATABASE_PASSWORD PF_DATABASE_PASSWORD PF_KEYCLOAK_DB_PASSWORD)
 # Images this repository builds: property-focus-<name>:<commit>.
 built_images=(task keycloak api mcp scheduler)
 # The services a rollback runs again, and the images they need.
@@ -200,6 +211,28 @@ print(value[0] if isinstance(value, list) and value else value)
 	[[ $issuer == "$expected" ]] || fail "$PF_DOGFOOD_APP_HOST$path names issuer '$issuer', expected $expected"
 }
 
+# Fails unless the realm's discovery document names its token endpoint and key set under
+# https on the auth host: Keycloak builds them from the X-Forwarded-* headers it trusts only
+# from Caddy's address (KC_PROXY_TRUSTED_ADDRESSES), so an http URL here means it does not
+# trust this Caddy.
+expect_https_realm_endpoints() {
+	local base="https://$PF_DOGFOOD_AUTH_HOST/realms/property-focus/" path=/realms/property-focus/.well-known/openid-configuration
+	local endpoints field value
+	endpoints=$(curl --silent --fail --resolve "$PF_DOGFOOD_AUTH_HOST:443:127.0.0.1" "${caddy_client[@]}" \
+		"https://$PF_DOGFOOD_AUTH_HOST$path" |
+		python3 -c '
+import json, sys
+document = json.load(sys.stdin)
+for field in ("token_endpoint", "jwks_uri"):
+    print(field, document.get(field, ""))
+') || true
+	for field in token_endpoint jwks_uri; do
+		value=$(awk -v f="$field" '$1 == f { print $2 }' <<<"$endpoints")
+		[[ $value == "$base"* ]] ||
+			fail "$PF_DOGFOOD_AUTH_HOST$path names $field '$value', expected one under $base; Keycloak must trust Caddy's address (KC_PROXY_TRUSTED_ADDRESSES)"
+	done
+}
+
 health_checks() {
 	log "health checks through Caddy and on loopback"
 	expect_public 200 "$PF_DOGFOOD_APP_HOST" /health/ready
@@ -215,6 +248,7 @@ health_checks() {
 	expect_public 404 "$PF_DOGFOOD_APP_HOST" /.well-known/openid-configuration
 	expect_public 200 "$PF_DOGFOOD_AUTH_HOST" /realms/property-focus/.well-known/openid-configuration
 	expect_public 200 "$PF_DOGFOOD_AUTH_HOST" /.well-known/openid-configuration/realms/property-focus
+	expect_https_realm_endpoints
 	expect_public 404 "$PF_DOGFOOD_AUTH_HOST" /admin/
 	expect_public 404 "$PF_DOGFOOD_AUTH_HOST" /realms/master/
 	expect_status 200 http://127.0.0.1:5080/healthz
@@ -250,20 +284,110 @@ recreate_proxy_and_collector() {
 previous_commit=$(readlink "$current" 2>/dev/null || true)
 previous_commit=${previous_commit##*/}
 
+# Prints why the release directory <release> cannot be deployed or rolled back to, or nothing
+# when it can. A release from before the Cloudflare edge would serve certificates Caddy can no
+# longer obtain behind the firewall. A release from before Caddy's reserved address on the
+# proxy network (x-caddy-address outside the network's ip_range) runs a Caddy that Keycloak,
+# which a deploy recreated, does not trust, and an MCP adapter that predates the separate MCP
+# token audience the realm now issues. Usage: release_problem <release>.
+release_problem() {
+	local compose_file=$1/infrastructure/dogfood/compose.yaml
+	if [[ ! -f $compose_file ]]; then
+		echo "has no release directory"
+	elif [[ ! -f $1/infrastructure/dogfood/cloudflare-ips.txt ]]; then
+		echo "predates the Cloudflare edge"
+	elif ! grep -q '^x-caddy-address:' "$compose_file" || ! grep -q '^[[:space:]]*ip_range:' "$compose_file"; then
+		echo "predates Caddy's reserved address on the proxy network and the separate MCP token audience (docs/operations.md, Rollback)"
+	fi
+}
+
+# Sets rollback_commit to the release a failed deploy hands the host back to, or to nothing:
+# the release `current` names, unless that is the commit being deployed (whose images the
+# build has retagged); then the newest other release current-history.tsv records. Either way
+# only a release release_problem accepts.
+choose_rollback_target() {
+	local candidate problem candidates=()
+	rollback_commit=
+	if [[ -n $previous_commit && $previous_commit != "$commit" ]]; then
+		candidates=("$previous_commit")
+	elif [[ -r $current_history ]]; then
+		while IFS= read -r candidate; do
+			[[ $candidate =~ ^[0-9a-f]{7,40}$ && $candidate != "$commit" ]] && candidates+=("$candidate")
+		done < <(awk -F '\t' '{ c[NR] = $2 } END { for (i = NR; i > 0; i--) print c[i] }' "$current_history")
+	fi
+	for candidate in ${candidates[@]+"${candidates[@]}"}; do
+		problem=$(release_problem "$releases_dir/$candidate")
+		if [[ -z $problem ]]; then
+			rollback_commit=$candidate
+			return 0
+		fi
+		log "not rolling back to $candidate: it $problem"
+		# Only the release `current` names is a candidate when it differs from this commit.
+		[[ $candidate == "$previous_commit" ]] && return 0
+	done
+}
+
+# Writes <previous> with the database_password_keys lines of <failed> in place of its own
+# (appended where <previous> has none): db-init has already set those passwords in Postgres
+# from <failed>. Usage: carry_database_passwords <previous> <failed>.
+carry_database_passwords() {
+	awk -v keys="${database_password_keys[*]}" '
+		BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) carried[k[i]] = 1 }
+		FNR == NR {
+			if (match($0, /^[A-Z_][A-Z0-9_]*=/) && (substr($0, 1, RLENGTH - 1) in carried))
+				line[substr($0, 1, RLENGTH - 1)] = $0
+			next
+		}
+		match($0, /^[A-Z_][A-Z0-9_]*=/) && (substr($0, 1, RLENGTH - 1) in line) {
+			key = substr($0, 1, RLENGTH - 1)
+			if (!(key in done)) print line[key]
+			done[key] = 1
+			next
+		}
+		{ print }
+		END { for (key in line) if (!(key in done)) print line[key] }' "$2" "$1"
+}
+
+# Before an automatic rollback: when this deploy installed a new environment file, sets it
+# aside as <file>.failed and makes the file it replaced live again, with the database
+# passwords db-init set from the new one, so the release rolled back to runs on its own
+# settings.
+restore_previous_environment_file() {
+	[[ -n ${saved_previous_env_file:-} ]] || return 0
+	(
+		umask 077
+		carry_database_passwords "$live_env_file.previous" "$live_env_file" >"$live_env_file.restored"
+	) || {
+		log "FAILED: cannot restore $live_env_file.previous; the rollback runs on the new environment file"
+		return 0
+	}
+	chmod 600 "$live_env_file.restored"
+	mv -f "$live_env_file" "$live_env_file.failed"
+	chmod 600 "$live_env_file.failed"
+	mv -f "$live_env_file.restored" "$live_env_file"
+	log "set the new environment file aside as $live_env_file.failed; restored $live_env_file.previous, keeping the database passwords db-init set from the new file"
+}
+
 # The EXIT trap of a deploy from the moment it starts the new release's services until
-# `current` points at that release. When the deploy fails there, it runs the release `current`
-# names again through that release's own `deploy.sh --rollback`; with no earlier release
-# (a first deploy, or a redeploy of the commit `current` names, whose images the build has
-# retagged) it stops the application services and Caddy instead, so no release that failed
-# its checks keeps serving. Migrations stay, as on every rollback (expand/contract). Exits
-# with the deploy's status.
+# `current` points at that release. When the deploy fails there, it restores the previous
+# environment file and runs the release choose_rollback_target picks through that release's
+# own `deploy.sh --rollback`; without one (a first deploy, or no earlier release that
+# release_problem accepts) it stops the application services and Caddy instead, so no
+# release that failed its checks keeps serving. Migrations stay, as on every rollback
+# (expand/contract). Exits with the deploy's status.
 undo_failed_start() {
 	local status=$?
 	trap - EXIT
-	if [[ -n $previous_commit && $previous_commit != "$commit" ]]; then
-		log "rolling back to $previous_commit, the release current names"
-		"$releases_dir/$previous_commit/infrastructure/dogfood/deploy.sh" --rollback "$previous_commit" ||
-			log "FAILED: the automatic rollback to $previous_commit failed; roll back by hand (docs/operations.md, Rollback)"
+	choose_rollback_target
+	if [[ -n $rollback_commit ]]; then
+		restore_previous_environment_file
+		if [[ $rollback_commit == "$previous_commit" ]]; then
+			log "rolling back to $rollback_commit, the release current names"
+		else
+			log "rolling back to $rollback_commit, the newest other release current named"
+		fi
+		"$releases_dir/$rollback_commit/infrastructure/dogfood/deploy.sh" --rollback "$rollback_commit" ||
+			log "FAILED: the automatic rollback to $rollback_commit failed; roll back by hand (docs/operations.md, Rollback)"
 	else
 		log "no earlier release to roll back to; stopping ${application_services[*]} and caddy"
 		compose stop "${application_services[@]}" caddy ||
@@ -272,10 +396,12 @@ undo_failed_start() {
 	exit "$status"
 }
 
-# Points `current` at this release, atomically.
+# Points `current` at this release, atomically, and records the switch.
 switch_current() {
 	ln -sfn "$release" "$current.next"
 	mv -fT "$current.next" "$current"
+	mkdir -p "$(dirname "$current_history")"
+	printf '%s\t%s\n' "$(date -u +%FT%TZ)" "$commit" >>"$current_history"
 }
 
 # Runs keycloak_realm.py over the loopback port with the realm placeholder values the
@@ -381,21 +507,56 @@ install_new_origin_pair() {
 
 # Moves the new environment file, which the whole preflight read and accepted, over the live
 # one (an atomic rename), so a rejected deploy leaves the live file to the services and to any
-# rollback. From here on this run reads the live file, which now holds the same values.
+# rollback. The live file is first copied to <file>.previous (mode 600), which an automatic
+# rollback restores. From here on this run reads the live file, which now holds the new values.
 install_new_environment_file() {
 	[[ $env_file == "$live_env_file.new" ]] || return 0
+	if [[ -e $live_env_file ]]; then
+		(
+			umask 077
+			cp "$live_env_file" "$live_env_file.previous.tmp"
+		)
+		chmod 600 "$live_env_file.previous.tmp"
+		mv -f "$live_env_file.previous.tmp" "$live_env_file.previous"
+		saved_previous_env_file=1
+	fi
 	log "installing the new environment file"
 	mv -f "$env_file" "$live_env_file"
 	env_file=$live_env_file
+}
+
+# Fails unless the host's proxy network, when it exists, has the subnet and ip_range this
+# release's compose.yaml defines. Docker cannot change an existing network's IPAM, and a
+# network without the ip_range lets a member that starts before Caddy take Caddy's fixed
+# address. Removing the network stops every container on it, so this asks the operator to
+# do that once rather than doing it in the middle of a deploy.
+check_proxy_network() {
+	local definition name expected inspected actual
+	definition=$(compose config --format json | python3 -c '
+import json, sys
+network = json.load(sys.stdin)["networks"]["proxy"]
+print(network["name"])
+print(" ".join("%s,%s" % (c.get("subnet", ""), c.get("ip_range", "")) for c in network["ipam"]["config"]))
+') || fail "cannot read the proxy network from $dogfood_dir/compose.yaml"
+	name=${definition%%$'\n'*} expected=${definition#*$'\n'}
+	# No such network yet: Compose creates it as defined.
+	inspected=$(docker network inspect --format '{{json .IPAM.Config}}' "$name" 2>/dev/null) || return 0
+	actual=$(python3 -c '
+import json, sys
+print(" ".join("%s,%s" % (c.get("Subnet", ""), c.get("IPRange", "")) for c in json.loads(sys.argv[1]) or []))
+' "$inspected") || fail "cannot read the IPAM configuration of the Docker network $name"
+	[[ $actual == "$expected" ]] ||
+		fail "the Docker network $name has subnet,ip_range '$actual' but $dogfood_dir/compose.yaml defines '$expected', and Docker cannot change an existing network. Remove it once (this stops Caddy, Keycloak, the API and the MCP adapter until a deploy starts them again), then deploy again: docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' $name | xargs -r docker rm --force && docker network rm $name (docs/operations.md, The host)"
 }
 
 compose_problem=$(bash "$script_dir/../docker/check-compose-version.sh" 2>&1) || fail "$compose_problem"
 [[ -f $dogfood_dir/compose.yaml ]] || fail "no release directory $release"
 [[ -f $release/frontend/dist/index.html ]] || fail "$release/frontend/dist has no web app build"
 check_env_file
-# A release from before the Cloudflare edge would serve certificates Caddy can no longer
-# obtain behind the firewall, so neither deploys nor rollbacks accept one.
-[[ -f $dogfood_dir/cloudflare-ips.txt ]] || fail "$release predates the Cloudflare edge"
+# Neither deploys nor rollbacks accept a release from before the Cloudflare edge or from
+# before Caddy's reserved address on the proxy network (release_problem).
+problem=$(release_problem "$release")
+[[ -z $problem ]] || fail "$release $problem"
 # The `-` operand reads standard input; BSD paste requires an operand.
 PF_CLOUDFLARE_IP_RANGES=$(cloudflare_ranges | paste -sd ' ' -)
 export PF_CLOUDFLARE_IP_RANGES
@@ -403,6 +564,7 @@ export PF_IMAGE_TAG=$commit
 load_environment
 : "${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST in $env_file}"
 : "${PF_DOGFOOD_AUTH_HOST:?set PF_DOGFOOD_AUTH_HOST in $env_file}"
+check_proxy_network
 
 if [[ $mode == rollback ]]; then
 	log "rolling the application back to $commit"

@@ -8,8 +8,11 @@
 # presents a certificate from Cloudflare's origin-pull CA (cloudflare-origin-pull-ca.pem,
 # mounted from the release), which Cloudflare sends once the zone's global Authenticated
 # Origin Pulls setting is on, or the host's own health-check certificate, which deploy.sh
-# creates beside the origin pair and presents on loopback. Anyone else reaching the origin,
-# past the firewall or from another Cloudflare range, fails the handshake.
+# creates beside the origin pair and presents on loopback. A client with neither, such as one
+# that got past the firewall from outside Cloudflare, fails the handshake. The origin-pull
+# certificate is global, shared by every Cloudflare zone, so it proves that a connection
+# comes from Cloudflare's network, not from this zone: a request another Cloudflare
+# customer's zone sends here still passes (docs/operations.md, Authenticated Origin Pulls).
 #
 # Client IPs: Caddy takes the client's address from CF-Connecting-IP, then X-Forwarded-For,
 # only when the connection comes from a Cloudflare range. PF_CLOUDFLARE_IP_RANGES holds those

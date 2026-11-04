@@ -35,8 +35,10 @@ x-hardening: &hardening
     - ALL
 
 # Caddy's fixed address on the proxy network, the only network it joins: the one address the
-# API and MCP adapter trust forwarded headers from (FORWARDED_ALLOW_IPS). Change it with the
-# subnet under networks.proxy if that subnet collides with one on the host.
+# API, the MCP adapter (FORWARDED_ALLOW_IPS) and Keycloak (KC_PROXY_TRUSTED_ADDRESSES) trust
+# forwarded headers from. It lies in the subnet under networks.proxy but outside its ip_range,
+# the part Docker hands out to the other members, so a member that starts first cannot take
+# it. Change the subnet, ip_range and this address together (docs/operations.md, The host).
 x-caddy-address: &caddy-address 10.250.10.2
 
 x-backend-build: &backend-build
@@ -348,12 +350,16 @@ configs:
       \gexec
 
 # Caddy reaches the API, the MCP adapter and Keycloak over `proxy` only, from its fixed
-# address; every other service talks over `default`.
+# address; every other service talks over `default`. Docker gives the other members, which
+# start before Caddy, addresses from ip_range only (10.250.10.9 to .14), never Caddy's. Docker
+# cannot change an existing network's IPAM, so deploy.sh refuses to run while the host's
+# `proxy` network differs from this definition (docs/operations.md, The host).
 networks:
   proxy:
     ipam:
       config:
         - subnet: 10.250.10.0/28
+          ip_range: 10.250.10.8/29
 
 volumes:
   postgres-data:

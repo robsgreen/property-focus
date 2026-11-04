@@ -306,16 +306,51 @@ def test_backend_services_trust_forwarded_headers_only_from_caddys_fixed_address
         text=True,
         check=True,
     )
-    subnet = json.loads(result.stdout)["networks"]["proxy"]["ipam"]["config"][0]["subnet"]
+    (ipam,) = json.loads(result.stdout)["networks"]["proxy"]["ipam"]["config"]
 
     assert list(proxy) == ["proxy"]
-    caddy_address = proxy["proxy"]["ipv4_address"]
-    assert ipaddress.ip_address(caddy_address) in ipaddress.ip_network(subnet)
+    caddy_address = ipaddress.ip_address(proxy["proxy"]["ipv4_address"])
+    assert caddy_address in ipaddress.ip_network(ipam["subnet"])
+    assert str(caddy_address) == services["api"]["environment"]["FORWARDED_ALLOW_IPS"]
+    caddy_address = str(caddy_address)
     for name in ("api", "mcp"):
         assert services[name]["environment"]["FORWARDED_ALLOW_IPS"] == caddy_address, name
     assert services["keycloak"]["environment"]["KC_PROXY_TRUSTED_ADDRESSES"] == caddy_address
     for name in ("api", "mcp", "keycloak"):
         assert "proxy" in services[name]["networks"], name
+
+
+def test_caddys_address_is_outside_the_range_docker_hands_the_other_proxy_members() -> None:
+    """Keycloak, the API and the MCP adapter start before Caddy and get dynamic addresses on
+    `proxy`; Docker draws those from ip_range only, so Caddy's fixed address stays free."""
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--file",
+            str(DOGFOOD / "compose.yaml"),
+            "config",
+            "--format",
+            "json",
+            "--no-interpolate",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    resolved = json.loads(result.stdout)
+    (ipam,) = resolved["networks"]["proxy"]["ipam"]["config"]
+    subnet = ipaddress.ip_network(ipam["subnet"])
+    dynamic = ipaddress.ip_network(ipam["ip_range"])
+    caddy_address = ipaddress.ip_address(
+        resolved["services"]["caddy"]["networks"]["proxy"]["ipv4_address"]
+    )
+
+    assert dynamic.subnet_of(subnet)
+    assert caddy_address in subnet
+    assert caddy_address not in dynamic
+    # Room for the three dynamic members, after the gateway Docker puts first in the range.
+    assert dynamic.num_addresses - 3 >= 3
 
 
 def headers(**values: str) -> Message:
@@ -656,15 +691,44 @@ def write_bsd_tools(directory: Path) -> Path:
 APP_HOST = "app.example.test"
 AUTH_HOST = "auth.example.test"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
-# Stands in for Docker: answers `compose version` with the minimum version and
-# `compose config --environment` with the hosts and the smoke user, and fails every other
-# command, so a deploy stops at its first image build.
+PROXY_NETWORK = "property-focus-dogfood_proxy"
+# The cases of a Docker stub that answer what deploy.sh reads about the proxy network: the
+# resolved Compose file (with an empty Keycloak environment for the realm script) names the
+# dogfood network, and `network inspect` answers $DOCKER_PROXY_IPAM, or fails as for a missing
+# network when that is unset.
+RESOLVED_COMPOSE = {
+    "networks": {
+        "proxy": {
+            "name": PROXY_NETWORK,
+            "ipam": {"config": [{"subnet": "10.250.10.0/28", "ip_range": "10.250.10.8/29"}]},
+        }
+    },
+    "services": {"keycloak": {"environment": {}}},
+}
+NETWORK_STUB_CASES = f"""*"config --format json"*) echo '{json.dumps(RESOLVED_COMPOSE)}' ;;
+"network inspect"*)
+	[ -n "$DOCKER_PROXY_IPAM" ] || {{ echo "Error: No such network" >&2; exit 1; }}
+	printf '%s\\n' "$DOCKER_PROXY_IPAM" ;;"""
+# Compose files of a release from this change on, and from before it (no reserved address).
+RELEASE_COMPOSE = (
+    "x-caddy-address: &caddy-address 10.250.10.2\n"
+    "networks:\n  proxy:\n    ipam:\n      config:\n"
+    "        - subnet: 10.250.10.0/28\n          ip_range: 10.250.10.8/29\n"
+)
+EARLIER_COMPOSE = (
+    "networks:\n  proxy:\n    ipam:\n      config:\n        - subnet: 10.250.10.0/28\n"
+)
+# Stands in for Docker: answers `compose version` with the minimum version,
+# `compose config --environment` with the hosts and the smoke user, answers what
+# NETWORK_STUB_CASES answers, and fails every other command, so a deploy stops at its first
+# image build.
 DOCKER_STUB = f"""#!/bin/sh
 case "$*" in
 "compose version") echo "Docker Compose version v2.27.2" ;;
 *"config --environment"*)
 	printf 'PF_DOGFOOD_APP_HOST={APP_HOST}\\nPF_DOGFOOD_AUTH_HOST={AUTH_HOST}\\n'
 	printf 'PF_SMOKE_USER_EMAIL=smoke@example.test\\n' ;;
+{NETWORK_STUB_CASES}
 *) echo "docker stub: $*" >&2; exit 97 ;;
 esac
 """
@@ -755,7 +819,7 @@ def deploy_host(tmp_path: Path) -> tuple[OriginPairs, dict[str, str]]:
     release = tmp_path / "releases" / COMMIT
     dogfood = release / "infrastructure" / "dogfood"
     dogfood.mkdir(parents=True)
-    (dogfood / "compose.yaml").write_text("services: {}\n")
+    (dogfood / "compose.yaml").write_text(RELEASE_COMPOSE)
     (dogfood / "cloudflare-ips.txt").write_text(CLOUDFLARE_IPS.read_text())
     (dogfood / "cloudflare-origin-ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
     (dogfood / "cloudflare-origin-pull-ca.pem").write_bytes(ORIGIN_PULL_CA.read_bytes())
@@ -899,14 +963,15 @@ case "$*" in
 *"config --environment"*)
 	printf 'PF_DOGFOOD_APP_HOST={APP_HOST}\\nPF_DOGFOOD_AUTH_HOST={AUTH_HOST}\\n'
 	printf 'PF_SMOKE_USER_EMAIL=smoke@example.test\\n' ;;
-*"config --format json"*) echo '{{"services": {{"keycloak": {{"environment": {{}}}}}}}}' ;;
+{NETWORK_STUB_CASES}
 "image inspect --format {{{{.Id}}}} property-focus-"*) echo "sha256:${{5%%:*}}" ;;
 esac
 """
 # Stands in for curl through a whole deploy: Cloudflare's published ranges; for a request to
 # Caddy, the TLS failure Caddy gives a client without a client certificate (unless
 # $CURL_ACCEPTS_ANY_CLIENT is set), else 404 for the paths deploy.sh expects to be hidden and
-# 200 otherwise, with metadata naming $CURL_ISSUER. Logs every request to $CURL_LOG.
+# 200 otherwise, with metadata naming $CURL_ISSUER and the realm's token endpoint and key set
+# under $CURL_ENDPOINTS (default $CURL_ISSUER). Logs every request to $CURL_LOG.
 FULL_CURL_STUB = f"""#!/bin/sh
 printf '%s\\n' "$*" >>"$CURL_LOG"
 case "$*" in
@@ -929,7 +994,10 @@ case "$*" in
 	*"{APP_HOST}/.well-known/openid-configuration"|*/admin/|*/realms/master/) printf 404 ;;
 	*) printf 200 ;;
 	esac ;;
-*) printf '{{"issuer": "%s", "authorization_servers": ["%s"]}}' "$CURL_ISSUER" "$CURL_ISSUER" ;;
+*)
+	endpoints=${{CURL_ENDPOINTS:-$CURL_ISSUER}}/protocol/openid-connect
+	printf '{{"issuer": "%s", "authorization_servers": ["%s"], ' "$CURL_ISSUER" "$CURL_ISSUER"
+	printf '"token_endpoint": "%s/token", "jwks_uri": "%s/certs"}}' "$endpoints" "$endpoints" ;;
 esac
 """
 ISSUER = f"https://{AUTH_HOST}/realms/property-focus"
@@ -958,14 +1026,43 @@ class DeployRun:
         log = self.tmp_path / "rollback.log"
         return log.read_text().splitlines() if log.exists() else []
 
-    def add_previous_release(self) -> None:
-        """A release that `current` names, whose deploy.sh records how it was run."""
-        dogfood = self.tmp_path / "releases" / PREVIOUS_COMMIT / "infrastructure" / "dogfood"
+    @property
+    def env_file(self) -> Path:
+        return Path(self.environment["PF_DOGFOOD_ENV_FILE"])
+
+    def add_release(self, commit: str, *, compose: str = RELEASE_COMPOSE) -> Path:
+        """A release directory for ``commit`` whose deploy.sh records how it was run and the
+        environment file it found, with ``compose`` as its compose.yaml."""
+        release = self.tmp_path / "releases" / commit
+        dogfood = release / "infrastructure" / "dogfood"
         dogfood.mkdir(parents=True)
+        (dogfood / "compose.yaml").write_text(compose)
+        (dogfood / "cloudflare-ips.txt").write_text(CLOUDFLARE_IPS.read_text())
+        (release / "frontend" / "dist").mkdir(parents=True)
+        (release / "frontend" / "dist" / "index.html").write_text("<!doctype html>\n")
         script = dogfood / "deploy.sh"
-        script.write_text(f'#!/bin/sh\necho "$*" >>"{self.tmp_path}/rollback.log"\n')
+        script.write_text(
+            "#!/bin/sh\n"
+            f'echo "$*" >>"{self.tmp_path}/rollback.log"\n'
+            f'cat "{self.env_file}" >"{self.tmp_path}/rollback-env-{commit}"\n'
+        )
         script.chmod(0o755)
-        self.current.symlink_to(dogfood.parents[1])
+        return release
+
+    def add_previous_release(self, *, compose: str = RELEASE_COMPOSE) -> None:
+        """A release that `current` names (see ``add_release``)."""
+        self.current.symlink_to(self.add_release(PREVIOUS_COMMIT, compose=compose))
+
+    def record_current_history(self, *commits: str) -> None:
+        """Lines of current-history.tsv, oldest first."""
+        history = self.tmp_path / "current-history.tsv"
+        history.write_text(
+            "".join(f"2026-11-0{i + 1}T00:00:00Z\t{c}\n" for i, c in enumerate(commits))
+        )
+
+    def rollback_environment(self, commit: str = PREVIOUS_COMMIT) -> str:
+        """The environment file the rollback to ``commit`` found live."""
+        return (self.tmp_path / f"rollback-env-{commit}").read_text()
 
 
 @pytest.fixture
@@ -1039,6 +1136,187 @@ def test_first_deploy_failing_its_health_checks_stops_the_new_application_and_ca
     assert not full_deploy.current.exists()
 
 
+OLDER_COMMIT = "abcdef0123456789abcdef0123456789abcdef01"
+FAILED_HEALTH_CHECK = "https://elsewhere.test/realms/property-focus"
+
+
+def test_deploy_failing_after_installing_a_new_environment_file_rolls_back_on_the_previous_one(
+    full_deploy: DeployRun,
+) -> None:
+    full_deploy.add_previous_release()
+    full_deploy.environment["CURL_ISSUER"] = FAILED_HEALTH_CHECK
+    previous = (
+        "PF_ENVIRONMENT=dogfood\nPF_DATABASE_PASSWORD=old-runtime-pw\n"
+        "PF_KEYCLOAK_SMTP_HOST=old-relay.test\n"
+    )
+    new = (
+        "PF_ENVIRONMENT=dogfood\nPF_DATABASE_PASSWORD=new-runtime-pw\n"
+        "PF_KEYCLOAK_SMTP_HOST=new-relay.test\nPF_KEYCLOAK_DB_PASSWORD=new-keycloak-pw\n"
+    )
+    full_deploy.env_file.write_text(previous)
+    Path(f"{full_deploy.env_file}.new").write_text(new)
+
+    result = run_deploy(full_deploy.environment)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert full_deploy.rollbacks() == [f"--rollback {PREVIOUS_COMMIT}"]
+    # The previous settings are live again, with the passwords db-init already set from the
+    # new file, before the rollback runs.
+    restored = (
+        "PF_ENVIRONMENT=dogfood\nPF_DATABASE_PASSWORD=new-runtime-pw\n"
+        "PF_KEYCLOAK_SMTP_HOST=old-relay.test\nPF_KEYCLOAK_DB_PASSWORD=new-keycloak-pw\n"
+    )
+    assert full_deploy.rollback_environment() == restored
+    assert full_deploy.env_file.read_text() == restored
+    for suffix, text in ((".failed", new), (".previous", previous)):
+        kept = Path(f"{full_deploy.env_file}{suffix}")
+        assert kept.read_text() == text, suffix
+        assert kept.stat().st_mode & 0o777 == 0o600, suffix
+    assert f"set the new environment file aside as {full_deploy.env_file}.failed" in result.stdout
+    assert "-pw" not in result.stdout + result.stderr
+
+
+def test_deploy_failing_without_a_new_environment_file_leaves_the_live_one_to_the_rollback(
+    full_deploy: DeployRun,
+) -> None:
+    full_deploy.add_previous_release()
+    full_deploy.environment["CURL_ISSUER"] = FAILED_HEALTH_CHECK
+    live = full_deploy.env_file.read_text()
+
+    run_deploy(full_deploy.environment)
+
+    assert full_deploy.rollback_environment() == live
+    assert not Path(f"{full_deploy.env_file}.failed").exists()
+
+
+def test_deploy_does_not_roll_back_to_a_release_from_before_caddys_reserved_address(
+    full_deploy: DeployRun,
+) -> None:
+    full_deploy.add_previous_release(compose=EARLIER_COMPOSE)
+    full_deploy.environment["CURL_ISSUER"] = FAILED_HEALTH_CHECK
+
+    result = run_deploy(full_deploy.environment)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert full_deploy.rollbacks() == []
+    assert f"not rolling back to {PREVIOUS_COMMIT}: it predates Caddy's reserved address" in (
+        result.stdout
+    )
+    assert full_deploy.docker_commands()[-1].endswith("stop api mcp scheduler caddy")
+
+
+@pytest.mark.parametrize(
+    "compose",
+    [
+        pytest.param(EARLIER_COMPOSE, id="no-caddy-address"),
+        pytest.param("x-caddy-address: &caddy-address 10.250.10.2\n", id="no-ip-range"),
+    ],
+)
+def test_rollback_refuses_a_release_from_before_caddys_reserved_address(
+    full_deploy: DeployRun, compose: str
+) -> None:
+    full_deploy.add_release(PREVIOUS_COMMIT, compose=compose)
+
+    result = subprocess.run(
+        ["bash", str(DEPLOY_SCRIPT), "--rollback", PREVIOUS_COMMIT],
+        env=full_deploy.environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 1
+    assert "predates Caddy's reserved address on the proxy network and the separate MCP token" in (
+        result.stdout
+    ), result.stdout + result.stderr
+    assert not any(" up " in command for command in full_deploy.docker_commands())
+
+
+def test_failed_redeploy_of_the_current_commit_rolls_back_to_the_newest_other_current_release(
+    full_deploy: DeployRun,
+) -> None:
+    full_deploy.current.symlink_to(full_deploy.tmp_path / "releases" / COMMIT)
+    full_deploy.add_release(OLDER_COMMIT)
+    full_deploy.add_release(PREVIOUS_COMMIT, compose=EARLIER_COMPOSE)
+    full_deploy.record_current_history(OLDER_COMMIT, PREVIOUS_COMMIT, COMMIT)
+    full_deploy.environment["CURL_ISSUER"] = FAILED_HEALTH_CHECK
+
+    result = run_deploy(full_deploy.environment)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    # PREVIOUS_COMMIT is newer but predates the reserved address, so OLDER_COMMIT it is.
+    assert full_deploy.rollbacks() == [f"--rollback {OLDER_COMMIT}"]
+    assert f"rolling back to {OLDER_COMMIT}, the newest other release current named" in (
+        result.stdout
+    )
+
+
+def test_failed_redeploy_of_the_current_commit_without_another_current_release_stops(
+    full_deploy: DeployRun,
+) -> None:
+    full_deploy.current.symlink_to(full_deploy.tmp_path / "releases" / COMMIT)
+    # Built once, but never current (a failed deploy): not a release to return to.
+    full_deploy.add_release(OLDER_COMMIT)
+    full_deploy.record_current_history(COMMIT)
+    full_deploy.environment["CURL_ISSUER"] = FAILED_HEALTH_CHECK
+
+    result = run_deploy(full_deploy.environment)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert full_deploy.rollbacks() == []
+    assert "no earlier release to roll back to" in result.stdout
+    assert full_deploy.docker_commands()[-1].endswith("stop api mcp scheduler caddy")
+
+
+def test_deploy_fails_and_rolls_back_when_the_realm_names_http_endpoints(
+    full_deploy: DeployRun,
+) -> None:
+    full_deploy.add_previous_release()
+    full_deploy.environment["CURL_ENDPOINTS"] = f"http://{AUTH_HOST}/realms/property-focus"
+
+    result = run_deploy(full_deploy.environment)
+
+    assert result.returncode == 1
+    assert f"names token_endpoint 'http://{AUTH_HOST}/realms/property-focus/protocol" in (
+        result.stdout
+    ), result.stdout + result.stderr
+    assert full_deploy.rollbacks() == [f"--rollback {PREVIOUS_COMMIT}"]
+
+
+@pytest.mark.parametrize(
+    ("ipam", "accepted"),
+    [
+        pytest.param("", True, id="no-network-yet"),
+        pytest.param(
+            '[{"Subnet":"10.250.10.0/28","IPRange":"10.250.10.8/29","Gateway":"10.250.10.8"}]',
+            True,
+            id="as-defined",
+        ),
+        pytest.param('[{"Subnet":"10.250.10.0/28","Gateway":"10.250.10.1"}]', False, id="stale"),
+    ],
+)
+def test_deploy_refuses_a_proxy_network_docker_cannot_change_before_it_changes_anything(
+    deploy_host: tuple[OriginPairs, dict[str, str]], ipam: str, accepted: bool
+) -> None:
+    _, environment = deploy_host
+    env_file = Path(environment["PF_DOGFOOD_ENV_FILE"])
+    live = env_file.read_text()
+    Path(f"{env_file}.new").write_text("PF_ENVIRONMENT=dogfood\n")
+
+    result = run_deploy(environment | {"DOCKER_PROXY_IPAM": ipam})
+
+    assert ("building images" in result.stdout) is accepted, result.stdout + result.stderr
+    if not accepted:
+        assert result.returncode == 1
+        assert (
+            f"docker network inspect --format '{{{{range .Containers}}}}{{{{.Name}}}} {{{{end}}}}' "
+            f"{PROXY_NETWORK} | xargs -r docker rm --force && docker network rm {PROXY_NETWORK}"
+        ) in result.stdout
+        assert "defines '10.250.10.0/28,10.250.10.8/29'" in result.stdout
+        assert env_file.read_text() == live
+
+
 @pytest.mark.skipif(
     subprocess.run(["mv", "--version"], capture_output=True, check=False).returncode != 0,
     reason="switch_current needs GNU mv -T, which the dogfood host has",
@@ -1054,6 +1332,8 @@ def test_deploy_passing_its_health_checks_switches_current_and_does_not_roll_bac
     assert f"deployed {COMMIT}" in result.stdout
     assert full_deploy.current.resolve().name == COMMIT
     assert full_deploy.rollbacks() == []
+    history = (full_deploy.tmp_path / "current-history.tsv").read_text().splitlines()
+    assert [line.split("\t")[1] for line in history] == [COMMIT]
 
 
 def test_deploy_installs_a_new_environment_file_once_the_preflight_accepts_it(
@@ -1097,6 +1377,7 @@ def test_deploy_rejecting_a_new_environment_file_leaves_the_live_one_untouched(
     assert "building images" not in result.stdout
     assert env_file.read_text() == live
     assert Path(f"{env_file}.new").exists()
+    assert not Path(f"{env_file}.previous").exists()
     assert "p$ss" not in result.stdout + result.stderr
 
 
@@ -1248,13 +1529,67 @@ def test_deploy_workflow_build_job_holds_no_secrets() -> None:
     assert "actions/upload-artifact@" in build
 
 
+def job_steps(lines: list[str]) -> list[dict[str, str]]:
+    """Each step of a job as its ``key: value`` settings (``with:`` entries included, comments
+    dropped); the lines of a ``run: |`` block are joined into ``run``."""
+    steps: list[dict[str, str]] = []
+    block_indent: int | None = None
+    for line in lines[next(i for i, line in enumerate(lines) if line.strip() == "steps:") + 1 :]:
+        indent = len(line) - len(line.lstrip(" -"))
+        if block_indent is not None and (not line.strip() or indent > block_indent):
+            steps[-1]["run"] += "\n" + line.strip()
+            continue
+        block_indent = None
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        if line.startswith("      - "):
+            steps.append({})
+        key, _, value = line.strip(" -").split(" #", 1)[0].partition(":")
+        steps[-1][key] = value.strip()
+        if key == "run" and value.strip() in ("|", ">-"):
+            steps[-1]["run"] = ""
+            block_indent = indent
+    return steps
+
+
+def step_using(steps: list[dict[str, str]], action: str) -> tuple[int, dict[str, str]]:
+    """The index and settings of the one step that uses ``action``."""
+    (found,) = [
+        (i, step) for i, step in enumerate(steps) if step.get("uses", "").startswith(action)
+    ]
+    return found
+
+
 def test_deploy_job_installs_nothing_from_a_package_registry() -> None:
     deploy = deploy_workflow_jobs()["deploy"]
 
     installs = [line for line in deploy if DEPENDENCY_INSTALLS.search(line.split("#")[0])]
     assert installs == []
-    assert any("actions/download-artifact@" in line for line in deploy)
-    assert not any("actions/checkout@" in line for line in deploy)
+
+
+def test_only_the_web_build_leaves_the_build_job_and_deploy_checks_out_the_same_commit() -> None:
+    """Third-party code runs in the build job, so the deploy job takes deploy.sh, the realm
+    script and the Dockerfiles from its own checkout of github.sha, and only frontend/dist from
+    the build job's artifact."""
+    jobs = deploy_workflow_jobs()
+    build = job_steps(jobs["build"])
+    deploy = job_steps(jobs["deploy"])
+
+    _, upload = step_using(build, "actions/upload-artifact@")
+    assert upload["path"] == "frontend/dist"
+    assert not any("tar " in step.get("run", "") for step in build)
+    checkout_index, checkout = step_using(deploy, "actions/checkout@")
+    download_index, download = step_using(deploy, "actions/download-artifact@")
+    assert checkout["ref"] == "${{ github.sha }}"
+    assert checkout["persist-credentials"] == "false"
+    assert checkout["uses"] == step_using(build, "actions/checkout@")[1]["uses"]
+    assert download["name"] == upload["name"]
+    # The download goes into the checkout, after it (checkout empties the workspace).
+    assert download["path"] == "frontend/dist"
+    assert checkout_index < download_index
+    (copy,) = [step for step in deploy if "rsync" in step.get("run", "")]
+    assert "--archive" in copy["run"]
+    assert " ./ " in copy["run"]
 
 
 def test_smoke_job_gets_only_the_smoke_password_and_no_deploy_secrets() -> None:

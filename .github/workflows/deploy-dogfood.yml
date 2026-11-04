@@ -6,10 +6,13 @@
 #
 # Three jobs keep every dependency install away from the deploy secrets:
 # - build (no environment, no secrets) installs the web app's dependencies, builds it for
-#   dogfood and uploads this commit's tree with frontend/dist as the `release` artifact;
-# - deploy (environment `dogfood`) installs nothing: it downloads that artifact, copies it to
-#   the host, writes the environment file and origin pair beside the live ones (<file>.new)
-#   and runs deploy.sh, which checks them before it installs them;
+#   dogfood and uploads only frontend/dist as the `web` artifact. Third-party code runs in
+#   this job, so nothing else it produces reaches the host: a compromised build dependency
+#   can change only the web build, never deploy.sh, the realm script or a Dockerfile;
+# - deploy (environment `dogfood`) installs nothing: it checks out the same commit
+#   (github.sha), puts the `web` artifact at frontend/dist in that checkout, copies the
+#   checkout to the host, writes the environment file and origin pair beside the live ones
+#   (<file>.new) and runs deploy.sh, which checks them before it installs them;
 # - smoke (environment `dogfood-smoke`, which holds only the smoke user's password) installs
 #   the backend and runs `make smoke-dogfood`, with neither the SSH key nor DOGFOOD_* secrets.
 #
@@ -66,16 +69,12 @@ jobs:
           PF_WEB_OIDC_CLIENT_ID: property-focus-web
         run: pnpm --filter @property-focus/web build
 
-      # A tarball keeps the scripts' executable bits, which the artifact's zip would drop.
-      - name: Package this commit and its web build
-        run: >-
-          tar --create --gzip --file "$RUNNER_TEMP/release.tar.gz"
-          --exclude=.git --exclude=node_modules --exclude=.venv .
-
+      # Only the web build leaves this job; the deploy job takes every other file from its own
+      # checkout of the same commit.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release
-          path: ${{ runner.temp }}/release.tar.gz
+          name: web
+          path: frontend/dist
           if-no-files-found: error
           retention-days: 1
 
@@ -93,15 +92,17 @@ jobs:
       # Where the host keeps one release directory per commit; deploy.sh runs from it.
       DOGFOOD_RELEASE: /srv/property-focus/releases/${{ github.sha }}
     steps:
+      # The commit the build job built, from Git: the checkout keeps the scripts' executable
+      # bits, and nothing here installs or runs anything from it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release
-          path: ${{ runner.temp }}
-
-      - name: Unpack the release
-        run: |
-          mkdir "$RUNNER_TEMP/release"
-          tar --extract --gzip --file "$RUNNER_TEMP/release.tar.gz" --directory "$RUNNER_TEMP/release"
+          name: web
+          path: frontend/dist
 
       - name: Configure SSH to the dogfood host
         env:
@@ -116,7 +117,7 @@ jobs:
       # A new directory per commit: the running release keeps its files, web build included,
       # until deploy.sh switches to this one.
       - name: Copy this commit and its web build to its release directory on the host
-        run: rsync --archive --compress --delete "$RUNNER_TEMP/release/" "$DOGFOOD_SSH_TARGET:$DOGFOOD_RELEASE/"
+        run: rsync --archive --compress --delete --exclude=.git ./ "$DOGFOOD_SSH_TARGET:$DOGFOOD_RELEASE/"
 
       # The smoke password is single-quoted, as the file format requires for values that may
       # hold $ (docs/operations.md). The file goes beside the live one as dogfood.env.new;
