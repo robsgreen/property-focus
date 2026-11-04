@@ -4,7 +4,8 @@ client-IP headers only from Cloudflare's ranges, the dogfood Compose file expose
 over TCP, the backend services trust forwarded headers only from Caddy, deploy.sh checks the
 edge before it changes anything and rolls a failed deploy back, the deploy workflow keeps
 dependency installs away from its secrets, and the smoke check refuses responses that bypass
-Cloudflare or are challenge pages.
+Cloudflare or are challenge pages, signs in through an MCP client it registers and always
+deletes that client.
 
 The Caddyfile is read as text: global options, snippets and sites are top-level blocks, and
 each line holds one directive. The Compose file is read through ``docker compose config``,
@@ -363,7 +364,225 @@ def test_smoke_names_bot_fight_mode_when_the_sign_in_meets_a_challenge(
     monkeypatch.setattr(smoke.OidcRealm, "sign_in", challenged)
 
     with pytest.raises(smoke.SmokeCheckError, match="Bot Fight Mode"):
-        smoke.sign_in("https://app.test", "https://auth.test", "smoke@example.test", "pw")
+        smoke.sign_in(
+            "https://auth.test",
+            "smoke@example.test",
+            "pw",
+            client_id=smoke.WEB_CLIENT_ID,
+            redirect_uri="https://app.test/auth/callback",
+        )
+
+
+SMOKE_ENVIRONMENT = {
+    "PF_DOGFOOD_APP_HOST": "app.test",
+    "PF_DOGFOOD_AUTH_HOST": "auth.test",
+    "PF_DOGFOOD_ORIGIN_ADDRESS": "192.0.2.10",
+    "PF_SMOKE_USER_EMAIL": "smoke@example.test",
+    "PF_SMOKE_USER_PASSWORD": "pw",
+}
+REGISTRATION_CLIENT_URI = (
+    "https://auth.test/realms/property-focus/clients-registrations/openid-connect/mcp-client-1"
+)
+
+
+def smoke_registration() -> Any:
+    return smoke.Registration(
+        201,
+        {
+            "client_id": "mcp-client-1",
+            "registration_access_token": "rat",
+            "registration_client_uri": REGISTRATION_CLIENT_URI,
+        },
+    )
+
+
+def stub_smoke_checks(monkeypatch: pytest.MonkeyPatch, fail: str | None = None) -> list[str]:
+    """Replace every network step of ``run_checks`` with one that records its call (with the
+    client and token it was given) in the returned list, and raises when named by ``fail``."""
+    calls: list[str] = []
+
+    def record(step: str, result: Any = None) -> Any:
+        calls.append(step)
+        if fail in (step, step.split(" ")[0]):
+            raise smoke.SmokeCheckError(f"{step} failed")
+        return result
+
+    def sign_in(auth_url: str, email: str, password: str, *, client_id: str, **_: str) -> str:
+        return str(record(f"sign_in {client_id}", f"{client_id}-token"))
+
+    stubs: dict[str, Any] = {
+        "check_ready": lambda app_url: record("check_ready"),
+        "check_admin_paths_hidden": lambda auth_url: record("check_admin_paths_hidden"),
+        "check_origin_unreachable": lambda address: record("check_origin_unreachable"),
+        "sign_in": sign_in,
+        "check_rest": lambda app_url, token: record(f"check_rest {token}"),
+        "check_mcp_refuses": lambda app_url, token: record(f"check_mcp_refuses {token}"),
+        "register_mcp_client": lambda auth_url: record("register_mcp_client", smoke_registration()),
+        "check_mcp": lambda app_url, token: record(f"check_mcp {token}"),
+        "check_rest_refuses": lambda app_url, token: record(f"check_rest_refuses {token}"),
+        "delete_mcp_client": lambda registration: record(
+            f"delete_mcp_client {registration.metadata['client_id']}"
+        ),
+    }
+    for name, stub in stubs.items():
+        monkeypatch.setattr(smoke, name, stub)
+    return calls
+
+
+def test_smoke_registers_signs_in_through_the_mcp_client_and_deletes_it_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = stub_smoke_checks(monkeypatch)
+
+    smoke.run_checks(SMOKE_ENVIRONMENT)
+
+    assert calls == [
+        "check_ready",
+        "check_admin_paths_hidden",
+        "check_origin_unreachable",
+        "sign_in property-focus-web",
+        "check_rest property-focus-web-token",
+        "check_mcp_refuses property-focus-web-token",
+        "register_mcp_client",
+        "sign_in mcp-client-1",
+        "check_mcp mcp-client-1-token",
+        "check_rest_refuses mcp-client-1-token",
+        "delete_mcp_client mcp-client-1",
+    ]
+
+
+@pytest.mark.parametrize("failing", ["sign_in mcp-client-1", "check_mcp", "check_rest_refuses"])
+def test_smoke_deletes_the_mcp_client_when_a_later_check_fails(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    calls = stub_smoke_checks(monkeypatch, fail=failing)
+
+    with pytest.raises(smoke.SmokeCheckError, match=f"^{failing}"):
+        smoke.run_checks(SMOKE_ENVIRONMENT)
+
+    failed_at = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith(f"{failing} ") or call == failing
+    )
+    assert calls.index("register_mcp_client") < failed_at
+    assert calls[failed_at + 1 :] == ["delete_mcp_client mcp-client-1"]
+
+
+@pytest.mark.parametrize("failing", ["check_origin_unreachable", "register_mcp_client"])
+def test_smoke_deletes_nothing_when_it_fails_before_a_client_is_registered(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    calls = stub_smoke_checks(monkeypatch, fail=failing)
+
+    with pytest.raises(smoke.SmokeCheckError, match=f"^{failing}"):
+        smoke.run_checks(SMOKE_ENVIRONMENT)
+
+    assert calls[-1] == failing
+    assert not any(call.startswith("delete_mcp_client") for call in calls)
+
+
+def test_smoke_reports_a_failed_delete_without_masking_the_failed_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_smoke_checks(monkeypatch, fail="check_mcp")
+
+    def delete_failed(registration: Any) -> None:
+        raise smoke.SmokeCheckError("deleting client mcp-client-1: 401")
+
+    monkeypatch.setattr(smoke, "delete_mcp_client", delete_failed)
+
+    with pytest.raises(smoke.SmokeCheckError, match=r"^check_mcp"):
+        smoke.run_checks(SMOKE_ENVIRONMENT)
+
+    assert "also failed to delete MCP client mcp-client-1" in capsys.readouterr().err
+
+
+def test_smoke_fails_when_only_the_delete_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub_smoke_checks(monkeypatch)
+
+    def delete_failed(registration: Any) -> None:
+        raise smoke.SmokeCheckError("deleting client mcp-client-1: 401")
+
+    monkeypatch.setattr(smoke, "delete_mcp_client", delete_failed)
+
+    with pytest.raises(smoke.SmokeCheckError, match="deleting client"):
+        smoke.run_checks(SMOKE_ENVIRONMENT)
+
+
+def recording_browser(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: str, **response_headers: str
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Make every ``Browser`` request answer ``status`` and ``body`` with ``response_headers``,
+    recording each request's method, URL and options."""
+    requests: list[tuple[str, str, dict[str, Any]]] = []
+
+    def request(_: object, method: str, url: str, **options: Any) -> Any:
+        requests.append((method, url, options))
+        return smoke.Response(status, url, headers(**response_headers), body)
+
+    monkeypatch.setattr(smoke.Browser, "request", request)
+    return requests
+
+
+def test_smoke_registers_a_public_loopback_client_anonymously_through_cloudflare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = recording_browser(
+        monkeypatch, 201, json.dumps(smoke_registration().metadata), cf_ray="8f00"
+    )
+
+    registration = smoke.register_mcp_client("https://auth.test")
+
+    assert registration.metadata["client_id"] == "mcp-client-1"
+    [(method, url, options)] = requests
+    assert (method, url) == (
+        "POST",
+        "https://auth.test/realms/property-focus/clients-registrations/openid-connect",
+    )
+    assert "bearer" not in options
+    assert options["json_body"]["redirect_uris"] == [smoke.MCP_REDIRECT_URI]
+    assert options["json_body"]["token_endpoint_auth_method"] == "none"
+
+
+def test_smoke_requires_the_registration_access_token_to_delete_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording_browser(monkeypatch, 201, json.dumps({"client_id": "c"}), cf_ray="8f00")
+
+    with pytest.raises(smoke.SmokeCheckError, match="registration_access_token"):
+        smoke.register_mcp_client("https://auth.test")
+
+
+def test_smoke_registration_must_come_through_cloudflare(monkeypatch: pytest.MonkeyPatch) -> None:
+    recording_browser(monkeypatch, 201, json.dumps(smoke_registration().metadata))
+
+    with pytest.raises(smoke.SmokeCheckError, match="no cf-ray header"):
+        smoke.register_mcp_client("https://auth.test")
+
+
+def test_smoke_deletes_the_client_with_its_registration_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = recording_browser(monkeypatch, 204, "", cf_ray="8f00")
+
+    smoke.delete_mcp_client(smoke_registration())
+
+    assert requests == [("DELETE", REGISTRATION_CLIENT_URI, {"bearer": "rat"})]
+
+
+def test_smoke_fails_when_the_client_is_not_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
+    recording_browser(monkeypatch, 401, "", cf_ray="8f00")
+
+    with pytest.raises(smoke.SmokeCheckError, match="401, expected 204"):
+        smoke.delete_mcp_client(smoke_registration())
+
+
+def test_smoke_expects_rest_to_refuse_the_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    recording_browser(monkeypatch, 404, "{}", cf_ray="8f00")
+
+    with pytest.raises(smoke.SmokeCheckError, match="expected 401"):
+        smoke.check_rest_refuses("https://app.test", "mcp-token")
 
 
 def test_smoke_fails_when_the_origin_accepts_a_direct_connection() -> None:

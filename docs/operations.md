@@ -71,7 +71,7 @@ Run the `deploy-dogfood` workflow from GitHub Actions on `main`; it deploys noth
 
 1. `build`, with no environment and no secrets, installs the web app's dependencies, builds it with the dogfood issuer and uploads the commit's tree with `frontend/dist` as the `release` artifact.
 2. `deploy`, once the `dogfood` environment's reviewers approve it, installs nothing: it downloads the artifact, copies it to a new release directory `/srv/property-focus/releases/<commit>`, writes the new environment file (`/etc/property-focus/dogfood.env.new`) and the new origin certificate and key beside the live pair (`/etc/property-focus/origin/cert.pem.new` and `key.pem.new`, the key with mode 600), runs that release's `infrastructure/dogfood/deploy.sh <commit>` on the host and removes its SSH key.
-3. `smoke`, in the `dogfood-smoke` environment, which holds only the smoke user's password, installs the backend and runs `make smoke-dogfood` from the runner, outside the host and through Cloudflare.
+3. `smoke`, in the `dogfood-smoke` environment, which holds only the smoke user's password, installs the backend and runs `make smoke-dogfood` from the runner, outside the host and through Cloudflare. It registers one MCP client anonymously, as any MCP client does, and deletes it with its registration access token when it ends; a failed delete fails the run (and is reported beside an earlier failure), and the client left behind is pruned like any other (see [Pruning registered MCP clients](#pruning-registered-mcp-clients); its client name is `Property Focus dogfood smoke`).
 
 The running release's files, web build included, stay untouched until step 6 below.
 
@@ -296,6 +296,7 @@ Keycloak never returns a stored SMTP password, so `keycloak_realm.py check` cann
 MCP clients register themselves, and registration stops at `PF_KEYCLOAK_MAX_CLIENTS` clients. Prune clients that are no longer used:
 
 1. In the console (`property-focus` realm, Clients), list clients with generated IDs; these are the dynamically registered ones. The realm's own clients (`property-focus-web` and the built-in ones) are never pruned.
+   A client named `Property Focus dogfood smoke` is one the smoke check failed to delete; it is always safe to delete.
 2. Check each candidate's Sessions tab; delete clients with no sessions that their users no longer need. Users of a deleted client register again on their next sign-in.
 3. `keycloak_realm.py apply` never deletes clients, so pruning is always this manual step.
 

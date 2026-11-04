@@ -207,7 +207,7 @@ PF_SMOKE_USER_PASSWORD=<smoke user password> \
   make smoke-dogfood 2>&1 | tee smoke-dogfood.log
 ```
 
-It checks API readiness, `404` on `/admin/` and `/realms/master/` on the auth host, the smoke user's PKCE sign-in through the dogfood Keycloak, the REST call and both MCP protocol paths, and prints one `ok:` line per check. Save the output (from the workflow log or the command above) as `specs/property-focus/gates/foundation-ready/smoke-dogfood.log`; it prints no token or password.
+It checks API readiness, `404` on `/admin/` and `/realms/master/` on the auth host, the smoke user's PKCE sign-in through the web client, the REST call with that token and the MCP endpoint's `401` for it; then it registers a public loopback client anonymously (dynamic client registration, as a generic MCP client does), signs the smoke user in through it with PKCE and consent, checks both MCP protocol paths and the REST API's `401` with that MCP-audience token, and always deletes the client with its registration access token, and prints one `ok:` line per check. Save the output (from the workflow log or the command above) as `specs/property-focus/gates/foundation-ready/smoke-dogfood.log`; it prints no token or password.
 
 - `make smoke-dogfood` output: _pending_
 

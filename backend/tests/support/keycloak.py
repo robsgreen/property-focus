@@ -11,6 +11,10 @@
 - ``register_client(metadata)`` calls the dynamic client registration endpoint that the
   realm's discovery document names.
 
+The module-level ``register_client(endpoint, metadata)``, ``mcp_client_metadata()`` and
+``delete_registration(registration)`` register and delete a client the way an MCP client
+does, with no admin access; the dogfood smoke check uses them against the deployed realm.
+
 Nothing here uses the direct-access (password) grant, which no client in the realm allows.
 The admin API is reached as the bootstrap admin, signed in through the master realm's admin
 console client with the same PKCE form flow. Its username and password come from
@@ -419,6 +423,38 @@ class Registration:
     metadata: dict[str, Any]
 
 
+def mcp_client_metadata(client_name: str, redirect_uri: str = MCP_REDIRECT_URI) -> dict[str, Any]:
+    """Registration metadata for a public loopback client, as MCP clients register."""
+    return {
+        "client_name": client_name,
+        "redirect_uris": [redirect_uri],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }
+
+
+def register_client(
+    endpoint: str, metadata: Mapping[str, Any], *, browser: Browser | None = None
+) -> Registration:
+    """Register a client anonymously at the dynamic client registration ``endpoint``,
+    through ``browser`` (a new ``Browser`` by default)."""
+    response = (browser or Browser()).request("POST", endpoint, json_body=dict(metadata))
+    body = response.json() if response.body.startswith("{") else {"error": response.body}
+    return Registration(response.status, body)
+
+
+def delete_registration(registration: Registration, *, browser: Browser | None = None) -> Response:
+    """Delete a registered client as its registrant does (RFC 7592): ``DELETE`` its
+    ``registration_client_uri`` with its ``registration_access_token``. Keycloak answers
+    ``204``. Raises ``KeyError`` when the registration lacks either value."""
+    return (browser or Browser()).request(
+        "DELETE",
+        registration.metadata["registration_client_uri"],
+        bearer=registration.metadata["registration_access_token"],
+    )
+
+
 class LocalKeycloak:
     """The ``property-focus`` realm on the local Keycloak, for one test session."""
 
@@ -478,28 +514,17 @@ class LocalKeycloak:
     @cached_property
     def _mcp_client_id(self) -> str:
         """A public loopback client registered anonymously, as MCP clients register."""
-        registration = self.register_client(
-            {
-                "client_name": "Synthetic MCP client",
-                "redirect_uris": [MCP_REDIRECT_URI],
-                "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-            }
-        )
+        registration = self.register_client(mcp_client_metadata("Synthetic MCP client"))
         assert registration.status == 201, registration.metadata
         client_id: str = registration.metadata["client_id"]
         return client_id
 
     def register_client(self, metadata: Mapping[str, Any]) -> Registration:
         """Register a client anonymously at the realm's advertised registration endpoint."""
-        response = Browser().request(
-            "POST", self.realm.discovery["registration_endpoint"], json_body=dict(metadata)
-        )
-        body = response.json() if response.body.startswith("{") else {"error": response.body}
-        if response.status == 201:
-            self._client_ids.append(body["client_id"])
-        return Registration(response.status, body)
+        registration = register_client(self.realm.discovery["registration_endpoint"], metadata)
+        if registration.status == 201:
+            self._client_ids.append(registration.metadata["client_id"])
+        return registration
 
     def delete_client(self, client_id: str) -> None:
         """Delete a client by its OAuth ``client_id``."""
