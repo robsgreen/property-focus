@@ -18,10 +18,10 @@ Every backend process reads its deployment choices from `PF_*` environment varia
 
 | Variable | Field | Default | Notes |
 |---|---|---|---|
-| `PF_ENVIRONMENT` | `environment` | none (required) | `development`, `dogfood`, `staging` or `production`. No default, so a deployment that forgets it fails at start-up |
+| `PF_ENVIRONMENT` | `environment` | none (required) | `development`, `dogfood`, `beta` or `production`. No default, so a deployment that forgets it fails at start-up |
 | `PF_DATA_MODE` | `data_mode` | `synthetic` | `synthetic` (fixtures only) or `live` |
 | `PF_AUTH_FIXTURE_ISSUER` | `fixture_issuer_enabled` | `false` | Refused unless `development` |
-| `PF_SECRET_PROVIDER` | `secret_provider` | `aws` in staging/production, else `deployment` | |
+| `PF_SECRET_PROVIDER` | `secret_provider` | `aws` in beta/production, else `deployment` | |
 | `PF_SECRET_PREFIX` | `secret_prefix` | `property-focus/<environment>` | Lower-case path pattern |
 | `PF_AWS_REGION` | `aws_region` | SDK resolution | AWS provider only |
 | `PF_DATABASE_URL` | `database_url` | `postgresql+psycopg://pf_runtime@localhost:5432/property_focus` | Runtime role. Must not contain a password |
@@ -54,7 +54,7 @@ Only the MCP server needs the `PF_MCP_*` values, so the other processes run with
 | Provider | Selected by | Lookup |
 |---|---|---|
 | `DeploymentInjectedSecretProvider` | `PF_SECRET_PROVIDER=deployment` (dogfood, development) | Environment variable `PF_<LOGICAL_NAME>`, read at each call; unset or empty counts as missing |
-| `AwsSecretProvider` | `PF_SECRET_PROVIDER=aws` (staging, production) | Secrets Manager secret `<prefix>/<name>`, then Parameter Store parameter `/<prefix>/<name>` with decryption. No caching, so a rotated value applies on the next call. Binary secrets raise `ValueError`; AWS errors other than not-found propagate |
+| `AwsSecretProvider` | `PF_SECRET_PROVIDER=aws` (beta, production) | Secrets Manager secret `<prefix>/<name>`, then Parameter Store parameter `/<prefix>/<name>` with decryption. No caching, so a rotated value applies on the next call. Binary secrets raise `ValueError`; AWS errors other than not-found propagate |
 
 Both providers pass every value they return to `telemetry.register_secret`, so later log lines and exported spans redact it.
 

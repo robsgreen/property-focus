@@ -29,7 +29,7 @@ def test_development_environment_uses_synthetic_data_and_injected_secrets() -> N
 
 @pytest.mark.parametrize(
     ("environment", "provider"),
-    [("dogfood", "deployment"), ("staging", "aws"), ("production", "aws")],
+    [("dogfood", "deployment"), ("beta", "aws"), ("production", "aws")],
 )
 def test_secret_provider_defaults_by_environment(environment: str, provider: str) -> None:
     settings = Settings.from_environment(
@@ -60,7 +60,7 @@ def test_explicit_values_override_defaults() -> None:
 
 def test_empty_variables_take_defaults() -> None:
     settings = Settings.from_environment(
-        {"PF_ENVIRONMENT": "staging", "PF_OIDC_ISSUER": DEPLOYED_ISSUER, "PF_DATA_MODE": ""}
+        {"PF_ENVIRONMENT": "beta", "PF_OIDC_ISSUER": DEPLOYED_ISSUER, "PF_DATA_MODE": ""}
     )
 
     assert settings.data_mode == "synthetic"
@@ -104,7 +104,7 @@ def test_fixture_issuer_is_allowed_in_development() -> None:
     assert settings.fixture_issuer_enabled
 
 
-@pytest.mark.parametrize("environment", ["dogfood", "staging", "production"])
+@pytest.mark.parametrize("environment", ["dogfood", "beta", "production"])
 def test_fixture_issuer_is_refused_outside_development(environment: str) -> None:
     environ = {
         "PF_ENVIRONMENT": environment,
@@ -120,7 +120,7 @@ def test_development_only_feature_runs_in_development() -> None:
     Settings.model_validate({"environment": "development"}).require_development("make dev")
 
 
-@pytest.mark.parametrize("environment", ["dogfood", "staging", "production"])
+@pytest.mark.parametrize("environment", ["dogfood", "beta", "production"])
 def test_development_only_feature_is_refused_outside_development(environment: str) -> None:
     settings = Settings.model_validate({"environment": environment, "oidc_issuer": DEPLOYED_ISSUER})
 
@@ -225,7 +225,7 @@ def test_oidc_defaults_follow_the_local_keycloak_realm_in_development() -> None:
 def test_oidc_settings_are_read_from_the_environment() -> None:
     settings = Settings.from_environment(
         {
-            "PF_ENVIRONMENT": "staging",
+            "PF_ENVIRONMENT": "beta",
             "PF_OIDC_ISSUER": DEPLOYED_ISSUER,
             "PF_OIDC_JWKS_URL": "https://auth.example.test/keys",
             "PF_OIDC_AUDIENCE": "web-client",
@@ -246,7 +246,7 @@ def test_oidc_settings_are_read_from_the_environment() -> None:
     assert settings.oidc_clock_skew_seconds == 30
 
 
-@pytest.mark.parametrize("environment", ["dogfood", "staging", "production"])
+@pytest.mark.parametrize("environment", ["dogfood", "beta", "production"])
 def test_oidc_issuer_is_required_outside_development(environment: str) -> None:
     with pytest.raises(ConfigurationError, match="PF_OIDC_ISSUER"):
         Settings.from_environment({"PF_ENVIRONMENT": environment})
@@ -350,7 +350,7 @@ def test_mcp_endpoint_is_read_from_the_environment() -> None:
     )
 
 
-@pytest.mark.parametrize("environment", ["dogfood", "staging", "production"])
+@pytest.mark.parametrize("environment", ["dogfood", "beta", "production"])
 def test_mcp_endpoint_is_refused_while_unset_outside_development(environment: str) -> None:
     settings = Settings.from_environment(
         {"PF_ENVIRONMENT": environment, "PF_OIDC_ISSUER": DEPLOYED_ISSUER}

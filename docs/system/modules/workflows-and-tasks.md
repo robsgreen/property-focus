@@ -101,7 +101,7 @@ A handler signals failure by raising `CodedError`; any other exception becomes `
 | `StepFunctionsTaskLauncher` | `StartExecution` named from the idempotency key (one name per launch); `ExecutionAlreadyExists` counts as started | Not wired yet |
 | `FargateTaskLauncher` | ECS `RunTask` (`FARGATE`, no public IP) with a command override | Not wired yet |
 
-`launcher_for()` raises `NotImplementedError` for staging and production. AWS throttling maps to `rate_limited` and service errors to `dependency_transient`. The AWS launchers pass against MiniStack ([compatibility](../../compatibility.md)).
+`launcher_for()` raises `NotImplementedError` for beta and production. AWS throttling maps to `rate_limited` and service errors to `dependency_transient`. The AWS launchers pass against MiniStack ([compatibility](../../compatibility.md)).
 
 ## Scheduling
 

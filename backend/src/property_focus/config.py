@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-Environment = Literal["development", "dogfood", "staging", "production"]
+Environment = Literal["development", "dogfood", "beta", "production"]
 
 # synthetic: fixtures only, no live sources or paid model calls. live: real sources and
 # providers, with credentials resolved through the secret provider.
@@ -96,7 +96,7 @@ class Settings(BaseModel):
     data_mode: DataMode = "synthetic"
     # Accept bearer tokens from the signed local fixture issuer. Development only.
     fixture_issuer_enabled: bool = False
-    # Defaults to "aws" in staging and production, "deployment" elsewhere.
+    # Defaults to "aws" in beta and production, "deployment" elsewhere.
     secret_provider: SecretProviderKind
     # Namespace for AWS secret and parameter names; defaults to "property-focus/<environment>".
     secret_prefix: str = Field(pattern=r"^[a-z0-9][a-z0-9/_-]*[a-z0-9]$")
@@ -197,7 +197,7 @@ class Settings(BaseModel):
         environment = values.get("environment")
         values = dict(values)
         values.setdefault(
-            "secret_provider", "aws" if environment in ("staging", "production") else "deployment"
+            "secret_provider", "aws" if environment in ("beta", "production") else "deployment"
         )
         if isinstance(environment, str):
             values.setdefault("secret_prefix", f"property-focus/{environment}")

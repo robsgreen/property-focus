@@ -88,10 +88,10 @@ describe('resolveDeploymentEnvironment', () => {
       webLogoutUrls: ['http://localhost:5173/'],
       mcpCallbackUrls: [MCP_CALLBACK],
     },
-    staging: {
+    beta: {
       account: null,
       region: 'us-west-2',
-      hostedUiDomainPrefix: 'property-focus-staging',
+      hostedUiDomainPrefix: 'property-focus-beta',
       webCallbackUrls: ['http://localhost:5173/auth/callback'],
       webLogoutUrls: ['http://localhost:5173/'],
       mcpCallbackUrls: [MCP_CALLBACK],
@@ -109,7 +109,7 @@ describe('resolveDeploymentEnvironment', () => {
       account: '123456789012',
       region: 'us-east-1',
     });
-    expect(resolveDeploymentEnvironment('staging', environments, undefined).env).toEqual({
+    expect(resolveDeploymentEnvironment('beta', environments, undefined).env).toEqual({
       region: 'us-west-2',
     });
   });
@@ -121,14 +121,14 @@ describe('resolveDeploymentEnvironment', () => {
   });
 
   it('refuses any credentials while the environment has no recorded account', () => {
-    expect(() => resolveDeploymentEnvironment('staging', environments, '123456789012')).toThrow(
+    expect(() => resolveDeploymentEnvironment('beta', environments, '123456789012')).toThrow(
       /no allowlisted AWS account/,
     );
   });
 
   it('refuses an unknown environment name', () => {
     expect(() => resolveDeploymentEnvironment('production', environments, undefined)).toThrow(
-      /Unknown environment "production"; expected one of: dogfood, staging/,
+      /Unknown environment "production"; expected one of: dogfood, beta/,
     );
   });
 

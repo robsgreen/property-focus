@@ -948,7 +948,7 @@ class TestIssuers:
         with pytest.raises(ValueError, match="PF_AUTH_FIXTURE_ISSUER"):
             fixture_verifier(settings, server.key_set)
 
-    @pytest.mark.parametrize("environment", ["dogfood", "staging", "production"])
+    @pytest.mark.parametrize("environment", ["dogfood", "beta", "production"])
     def test_fixture_issuer_is_refused_without_the_development_flag(self, environment: str) -> None:
         environ = {
             "PF_ENVIRONMENT": environment,

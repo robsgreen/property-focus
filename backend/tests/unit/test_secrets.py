@@ -17,7 +17,7 @@ from property_focus.adapters.secrets import (
 from property_focus.application.ports import SecretNotFoundError, SecretProvider
 from property_focus.config import Settings
 
-PREFIX = "property-focus/staging"
+PREFIX = "property-focus/beta"
 
 
 def aws_client(service: str) -> Any:
@@ -135,10 +135,10 @@ class TestSelection:
 
         assert isinstance(secret_provider_for(settings), DeploymentInjectedSecretProvider)
 
-    def test_staging_uses_aws(self) -> None:
+    def test_beta_uses_aws(self) -> None:
         settings = Settings.model_validate(
             {
-                "environment": "staging",
+                "environment": "beta",
                 "oidc_issuer": "https://auth.example.test/realms/pf",
                 "aws_region": "us-east-1",
             }

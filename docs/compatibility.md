@@ -13,11 +13,11 @@ until it passes on AWS.
 
 | Service | Operation | Used by | Emulator | Local result | AWS result | Fallback |
 |---|---|---|---|---|---|---|
-| Secrets Manager | GetSecretValue | `AwsSecretProvider` (`adapters/secrets.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS staging |
-| Systems Manager Parameter Store | GetParameter (SecureString, ParameterNotFound) | `AwsSecretProvider` (`adapters/secrets.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS staging |
-| Lambda | Invoke (InvocationType Event) | `LambdaTaskLauncher` (`runtime/launcher.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS staging |
-| Step Functions | StartExecution (ExecutionAlreadyExists reuse) | `StepFunctionsTaskLauncher` (`runtime/launcher.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS staging |
-| ECS | RunTask (FARGATE launch type) | `FargateTaskLauncher` (`runtime/launcher.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS staging |
+| Secrets Manager | GetSecretValue | `AwsSecretProvider` (`adapters/secrets.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS beta |
+| Systems Manager Parameter Store | GetParameter (SecureString, ParameterNotFound) | `AwsSecretProvider` (`adapters/secrets.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS beta |
+| Lambda | Invoke (InvocationType Event) | `LambdaTaskLauncher` (`runtime/launcher.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS beta |
+| Step Functions | StartExecution (ExecutionAlreadyExists reuse) | `StepFunctionsTaskLauncher` (`runtime/launcher.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS beta |
+| ECS | RunTask (FARGATE launch type) | `FargateTaskLauncher` (`runtime/launcher.py`) | MiniStack 1.5.35 | pass | not run (no AWS account before phase 9) | botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS beta |
 
 ## Unsupported operations
 

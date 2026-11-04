@@ -1132,6 +1132,8 @@ Monorepo does **not** imply one deployment. Components remain independently buil
 
 **Amended 2026-11-02 (user):** see A5 (Cloudflare in front of dogfood; AWS WAF on AWS).
 
+**Amended 2026-11-04 (user):** beta replaces staging. The AWS pre-production environment is called `beta`, and there are two AWS environments, beta and production; no separate staging environment exists. Merging to `main` deploys beta, and beta runs the integration tests (`backend/tests/aws`, the suite `make smoke-aws` runs, plus the readiness health check). Production is not promoted automatically: it deploys only after every beta check passes and a human approves, because the `production` GitHub environment has required reviewers (the user) and is restricted to `main`. This replaces the 2026-11-02 decision that promotion needs no human approval. Where the text below says staging, read beta.
+
 **Decision**
 
 Use GitHub Actions for CI/CD, a reproducible DigitalOcean dogfood environment, real AWS staging, and eventual AWS production.
@@ -1416,6 +1418,8 @@ The user: "shouldn't matter — we'll use OAuth." Standard OAuth removes the nee
 ---
 
 ## A4. Self-hosted Keycloak for development, tests and dogfood; Cognito on AWS (refines D28)
+
+**Amended 2026-11-04 (user):** the AWS environments are beta and production; beta replaces staging (see D48).
 
 **Decision**
 

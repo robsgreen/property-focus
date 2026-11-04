@@ -46,7 +46,7 @@ Validation lines refer to these sets by name. A set member that does not exist y
 | `E2E` | `make test-e2e` |
 | `RECOVERY` | `make restore-check`; `make compatibility-local` |
 | `VERIFY` | `make verify` (runs `INSTALL`, `BE-CHECK`, `BE-UNIT`, `BE-INT`, `BE-REPLAY`, `GEN`, `FE`, `INFRA`) |
-| `LIVE` (explicit user approval required) | `make test-live` (needs `PF_LIVE=1`); `make deploy-identity ENV=staging` (phase 9 only); `pnpm --filter @property-focus/infra diff --context environment=staging`; `make smoke-aws ENV=staging`; `make smoke-dogfood`; `make storage-check ENV=dogfood` |
+| `LIVE` (explicit user approval required) | `make test-live` (needs `PF_LIVE=1`); `make deploy-identity ENV=beta` (phase 9 only); `pnpm --filter @property-focus/infra diff --context environment=beta`; `make smoke-aws ENV=beta`; `make smoke-dogfood`; `make storage-check ENV=dogfood` |
 
 ---
 
@@ -3768,7 +3768,7 @@ specs/property-focus/gates/investor-offer-ready.md       (create)
 
 **Goal:** CDK deployment of data, API, workflow and observability stacks; the Cognito identity stack deployed and configured as the AWS issuer for REST and MCP (A4); AWS WAF and API Gateway throttling for `/v1` and `/mcp` (Task 9.8, A5); Step Functions and Fargate compatibility; AWS-side shadow runs; operational drills. **Deliverable:** the AWS ready gate.
 
-> **Checkpoint CP-9.A (blocking for Tasks 9.4–9.8 live steps) — AWS staging account.** Owner: user. Provision an isolated AWS staging account, add it to the CDK account allowlist and the `make smoke-aws` staging allowlist, and configure the `staging` GitHub environment's OIDC role. Synthesis and unit tests proceed without it. Merging `deploy-aws.yml` to `main` starts a staging deployment, so merge it only after this answer is recorded. Create the `production` environment and its OIDC role only after the AWS ready gate passes; until then the pipeline ends after the staging checks (plan recommendation).
+> **Checkpoint CP-9.A (blocking for Tasks 9.4–9.8 live steps) — AWS beta account.** Owner: user. Provision an isolated AWS beta account, add it to the CDK account allowlist and the `make smoke-aws` beta allowlist, and configure the `beta` GitHub environment's OIDC role. Synthesis and unit tests proceed without it. Merging `deploy-aws.yml` to `main` starts a beta deployment, so merge it only after this answer is recorded. Create the `production` environment (restricted to `main`, with the user as its required reviewer) and its OIDC role only after the AWS ready gate passes; until then the pipeline ends after the beta checks (plan recommendation).
 
 > **Checkpoint CP-9.B (blocking for sub-task 9.7.5) — Cognito OAuth dynamic client registration.** Owner: infrastructure engineer, in phase 9 (moved from phase 0 by A4). Question: does Cognito support OAuth dynamic client registration or Client ID Metadata Documents for MCP clients? Record the research result and, if it does not, the callback-URL allowlist procedure for the identity stack's shared pre-registered MCP client. Tasks 9.1–9.4 and 9.7.1–9.7.4 proceed. Do not build dynamic registration on Cognito before the answer is recorded.
 
@@ -3893,7 +3893,7 @@ backend/src/property_focus/adapters/telemetry.py         (modify)
 
 ### Task 9.4: AWS Deployment Pipeline and AWS Test Suites
 
-Deploy through a GitHub Actions pipeline that runs on merge to `main`: staging first, the staging checks, then automatic promotion to production only when every check passes (user decision, 2026-11-02). Add the AWS smoke and redelivery suite and a structure test for both deploy workflows.
+Deploy through a GitHub Actions pipeline that runs on merge to `main`: beta first, the beta checks (the integration tests), then promotion to production only when every check passes and a reviewer approves the `production` environment (user decisions, 2026-11-02 and 2026-11-04). Add the AWS smoke and redelivery suite and a structure test for both deploy workflows.
 
 **Modules:** root tooling, `backend`, `infrastructure/cdk`
 **Depends on:** 9.3, CP-9.A (live steps)
@@ -3912,32 +3912,34 @@ docs/operations.md                                       (modify)
 
 **Sub-tasks:**
 
-- [ ] **9.4.1** — Write `deploy-aws.yml`, triggered by `push` to `main`: a build job (image built once, tagged with commit and digest); a `staging` job on the `staging` GitHub environment (`cdk diff` recorded in the run log, CDK stacks deployed, migrations as one controlled task); staging-check jobs; a `production` job on the `production` environment that deploys the same digest and stacks, runs migrations as one controlled task and runs the readiness health check. Each AWS job assumes its environment's scoped role through GitHub OIDC (`permissions: id-token: write`, `role-to-assume`); no AWS access key appears in the workflow or repository secrets. One concurrency group per environment with `cancel-in-progress: false` (plan recommendation). Image rollback without reversing destructive schema changes stays a documented operator step (9.4.4).
+- [ ] **9.4.1** — Write `deploy-aws.yml`, triggered by `push` to `main`: a build job (image built once, tagged with commit and digest); a `beta` job on the `beta` GitHub environment (`cdk diff` recorded in the run log, CDK stacks deployed, migrations as one controlled task); beta-check jobs; a `production` job on the `production` environment, which waits for its required reviewer's approval, that deploys the same digest and stacks, runs migrations as one controlled task and runs the readiness health check. Each AWS job assumes its environment's scoped role through GitHub OIDC (`permissions: id-token: write`, `role-to-assume`); no AWS access key appears in the workflow or repository secrets. One concurrency group per environment with `cancel-in-progress: false` (plan recommendation). Image rollback without reversing destructive schema changes stays a documented operator step (9.4.4).
 - [ ] **9.4.2** — Write `backend/tests/aws/test_pipeline.py`: S3 write and read, SQS redelivery and DLQ, the EventBridge `imap-poll` schedule, Step Functions retries and catches, Lambda auth on REST and MCP, and Fargate browser launch.
-- [ ] **9.4.3** — Add `make smoke-aws ENV=staging`: require an explicit staging account allowlist, invoke `uv run pytest backend/tests/aws -q`, never create or delete production data.
+- [ ] **9.4.3** — Add `make smoke-aws ENV=beta`: require an explicit beta account allowlist, invoke `uv run pytest backend/tests/aws -q`, never create or delete production data.
 - [ ] **9.4.4** — Document the AWS deploy, rollback and expand/contract migration procedure in `docs/operations.md`.
-- [ ] **9.4.5** — Promotion gate. The staging-check jobs run the staging readiness health check and `make smoke-aws ENV=staging` (plan recommendation for the list). The `production` job `needs` every staging-check job and carries no `if: always()`, `continue-on-error` or other override, so a failed or cancelled check skips it and production keeps its image, stacks and schema. The `production` environment restricts deployments to `main` and has no required reviewers (user decision: promotion is automatic). Document the pipeline and the failing-check behavior in `docs/operations.md`.
-- [ ] **9.4.6** — Write `backend/tests/unit/test_deploy_workflows.py`, which parses both deploy workflows. For `deploy-dogfood.yml`: `workflow_dispatch` is the only trigger and the deploy job uses the `dogfood` environment. For `deploy-aws.yml`: the trigger is `push` to `main`; `production` depends, directly or through `needs`, on `staging` and every staging-check job; no job on that path uses `if: always()`, `if: failure()`, `continue-on-error` or another status-function override; `production` deploys the digest output of the build job that staging used; both AWS jobs use `id-token: write` and `role-to-assume`; neither workflow names `aws-access-key-id`, `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`. Negative cases: a workflow fixture whose `production` job lacks the `needs` on a staging check, one with `continue-on-error` on a check, one with a `push` trigger added to dogfood, and one with a static AWS key each fail.
+- [ ] **9.4.5** — Promotion gate. The beta-check jobs run the integration tests: the beta readiness health check and `make smoke-aws ENV=beta` (plan recommendation for the list). The `production` job `needs` every beta-check job and carries no `if: always()`, `continue-on-error` or other override, so a failed or cancelled check skips it and production keeps its image, stacks and schema. The `production` environment restricts deployments to `main` and has required reviewers (the user), so the production job waits for approval after the beta checks pass and never deploys without it (user decision, 2026-11-04: no automatic promotion yet). Document the pipeline, the approval step and the failing-check behavior in `docs/operations.md`.
+- [ ] **9.4.6** — Write `backend/tests/unit/test_deploy_workflows.py`, which parses both deploy workflows. For `deploy-dogfood.yml`: `workflow_dispatch` is the only trigger and the deploy job uses the `dogfood` environment. For `deploy-aws.yml`: the trigger is `push` to `main`; `production` depends, directly or through `needs`, on `beta` and every beta-check job and runs on the `production` environment; no job on that path uses `if: always()`, `if: failure()`, `continue-on-error` or another status-function override; `production` deploys the digest output of the build job that beta used; both AWS jobs use `id-token: write` and `role-to-assume`; neither workflow names `aws-access-key-id`, `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`. Negative cases: a workflow fixture whose `production` job lacks the `needs` on a beta check, one whose `production` job has no `environment: production`, one with `continue-on-error` on a check, one with a `push` trigger added to dogfood, and one with a static AWS key each fail.
 
 **Validation:**
 
 - [ ] **Build:** `INFRA` exits 0; workflow syntax check passes.
-- [ ] **Tests:** `test_pipeline.py` is collected and skipped without staging credentials; `BE-UNIT` passes `test_deploy_workflows.py`, including the negative cases in 9.4.6.
+- [ ] **Tests:** `test_pipeline.py` is collected and skipped without beta credentials; `BE-UNIT` passes `test_deploy_workflows.py`, including the negative cases in 9.4.6.
 - [ ] **Requirements:**
     - [ ] "CI scans committed files, `/fixtures` and evidence fixtures for secrets; cloud deployments use GitHub OIDC with scoped roles and protected production environments."
     - [ ] "`deploy-dogfood.yml` has `workflow_dispatch` as its only trigger and runs its deploy job on the protected `dogfood` GitHub environment, whose required reviewers approve each run. Merging to `main` starts no dogfood deployment."
-    - [ ] "Phase 9: `deploy-aws.yml` triggers on `push` to `main`. Its jobs run in this order: build the image once …; deploy … to the `staging` environment …; run the staging checks; deploy the same image digest and stacks to the `production` environment."
-    - [ ] "The production job `needs` every staging-check job and has no `if: always()`, `continue-on-error` or other override, so any failed or cancelled staging check skips it and production keeps its previous image, stacks and schema."
+    - [ ] "Phase 9: `deploy-aws.yml` triggers on `push` to `main`. Its jobs run in this order: build the image once …; deploy … to the `beta` environment …; run the beta checks; after a reviewer approves the `production` environment, deploy the same image digest and stacks to the `production` environment."
+    - [ ] "The beta checks are the integration tests: the beta readiness health check and `make smoke-aws ENV=beta` (`backend/tests/aws`: …) (plan recommendation for the list)."
+    - [ ] "The production job `needs` every beta-check job and has no `if: always()`, `continue-on-error` or other override, so any failed or cancelled beta check skips it and production keeps its previous image, stacks and schema."
+    - [ ] "Promotion needs a human approval: the `production` GitHub environment restricts deployments to `main` and has required reviewers (the user), so the production job waits for that approval after the beta checks pass and never deploys without it (user decision, 2026-11-04)."
     - [ ] "Both AWS jobs obtain credentials only through GitHub OIDC (`permissions: id-token: write` and a scoped `role-to-assume` per environment). No workflow or repository secret holds an AWS access key."
-    - [ ] "`make smoke-aws` MUST require an explicit staging account allowlist and invoke `uv run pytest backend/tests/aws -q`; it must not create or delete production data."
+    - [ ] "`make smoke-aws` MUST require an explicit beta account allowlist and invoke `uv run pytest backend/tests/aws -q`; it must not create or delete production data."
     - [ ] "Build once, tag with commit and digest, promote the same image, run migrations as one controlled task, then run smoke checks. Roll back application images without reversing destructive schema changes; use expand/contract migrations." (AWS part)
-- [ ] **Verify:** `make smoke-aws ENV=production` exits non-zero with an allowlist refusal. `grep -nE 'aws-access-key-id|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY' .github/workflows/*.yml` returns nothing. **Live (explicit user approval required):** `pnpm --filter @property-focus/infra diff --context environment=staging`.
+- [ ] **Verify:** `make smoke-aws ENV=production` exits non-zero with an allowlist refusal. `grep -nE 'aws-access-key-id|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY' .github/workflows/*.yml` returns nothing. **Live (explicit user approval required):** `pnpm --filter @property-focus/infra diff --context environment=beta`.
 
 ---
 
 ### Task 9.7: Cognito Identity on AWS
 
-Deploy the retained CDK identity stack to staging, configure the generic OIDC verifier with the Cognito issuer for the REST and MCP Lambdas, settle MCP client registration on Cognito, and make web sign-out work against Cognito's hosted UI (A4). Numbered 9.7 so existing task numbers stay stable; it runs after Task 9.4 and before Task 9.5.
+Deploy the retained CDK identity stack to beta, configure the generic OIDC verifier with the Cognito issuer for the REST and MCP Lambdas, settle MCP client registration on Cognito, and make web sign-out work against Cognito's hosted UI (A4). Numbered 9.7 so existing task numbers stay stable; it runs after Task 9.4 and before Task 9.5.
 
 **Modules:** `infrastructure/cdk`, `backend`, `frontend`, root tooling, `docs`
 **Depends on:** 9.1, 9.4; CP-9.A (live steps); CP-9.B (sub-task 9.7.5)
@@ -3960,8 +3962,8 @@ docs/operations.md                                       (modify)
 
 **Sub-tasks:**
 
-- [ ] **9.7.1** — Change `make deploy-identity` to accept only `ENV=staging` or `ENV=production` and refuse `dogfood`; remove the `dogfood` entry from the `propertyFocus:environments` context in `cdk.json` and set the staging callback and logout URLs to the staging hostnames; keep `identity.test.ts` passing.
-- [ ] **9.7.2** — Add the identity stack to `deploy-aws.yml`: the `staging` job runs `make deploy-identity ENV=staging` after recording a `cdk diff` that lists only identity-stack resources, before the staging checks; the `production` job runs `make deploy-identity ENV=production` under the same promotion gate (9.4.5).
+- [ ] **9.7.1** — Change `make deploy-identity` to accept only `ENV=beta` or `ENV=production` and refuse `dogfood`; remove the `dogfood` entry from the `propertyFocus:environments` context in `cdk.json` and set the beta callback and logout URLs to the beta hostnames; keep `identity.test.ts` passing.
+- [ ] **9.7.2** — Add the identity stack to `deploy-aws.yml`: the `beta` job runs `make deploy-identity ENV=beta` after recording a `cdk diff` that lists only identity-stack resources, before the beta checks; the `production` job runs `make deploy-identity ENV=production` under the same promotion gate (9.4.5).
 - [ ] **9.7.3** — In `api-stack.ts`, give the REST and MCP Lambdas the Cognito issuer as ordinary configuration (Parameter Store or environment): `PF_OIDC_ISSUER` set to the user-pool issuer, `PF_OIDC_AUDIENCE` set to the web app client ID and `PF_MCP_AUDIENCE` to the MCP app client ID(s) (they must not overlap), `PF_OIDC_AUDIENCE_CLAIM=client_id`, `PF_OIDC_TOKEN_TYPE=token_use=access`. Add no Cognito-specific code.
 - [ ] **9.7.4** — Extend `test_auth.py`: under the AWS configuration a Cognito-shaped access token (test key; `client_id` and `token_use=access`) passes, a Cognito ID token (`token_use=id`) fails and a Keycloak-shaped token fails; under the dogfood configuration a Cognito-shaped token fails.
 - [ ] **9.7.5** — Apply the CP-9.B result: if Cognito supports dynamic client registration, enable it under rules equivalent to the Keycloak realm's (public clients, PKCE `S256`, HTTPS or loopback redirects); otherwise keep the identity stack's one pre-registered public MCP client and document the callback-URL allowlist procedure in `docs/operations.md`. On AWS, protected-resource metadata names the Cognito issuer.
@@ -3971,13 +3973,13 @@ docs/operations.md                                       (modify)
 **Validation:**
 
 - [ ] **Build:** `INFRA`, `BE-CHECK` and `FE` exit 0.
-- [ ] **Tests:** `BE-UNIT` passes the Cognito-shaped cases in 9.7.4; `pnpm --filter @property-focus/web test --run` passes the 9.7.7 cases in `sign-out.test.tsx`; `pnpm --filter @property-focus/infra test --run` passes `identity.test.ts`; `test_pipeline.py` is collected and skipped without staging credentials.
+- [ ] **Tests:** `BE-UNIT` passes the Cognito-shaped cases in 9.7.4; `pnpm --filter @property-focus/web test --run` passes the 9.7.7 cases in `sign-out.test.tsx`; `pnpm --filter @property-focus/infra test --run` passes `identity.test.ts`; `test_pipeline.py` is collected and skipped without beta credentials.
 - [ ] **Requirements:**
-    - [ ] "`infrastructure/cdk/lib/identity-stack.ts`, built in phase 0, synthesizes in CI and is not deployed before phase 9. In phase 9, `make deploy-identity ENV=staging` deploys only the identity stack (user pool, web app client, MCP app client) to the staging account; `cdk diff` for that command lists no resource outside the identity stack."
+    - [ ] "`infrastructure/cdk/lib/identity-stack.ts`, built in phase 0, synthesizes in CI and is not deployed before phase 9. In phase 9, `make deploy-identity ENV=beta` deploys only the identity stack (user pool, web app client, MCP app client) to the beta account; `cdk diff` for that command lists no resource outside the identity stack."
     - [ ] "AWS environments configure the same `adapters/auth/oidc.py` verifier with the Cognito user-pool issuer; no Cognito-specific code path exists. … A Keycloak-issued token fails under the AWS configuration and a Cognito-shaped token fails under the dogfood configuration (`test_auth.py`)."
     - [ ] "On AWS, protected-resource metadata names the Cognito issuer. MCP client registration follows the phase 9 research result: dynamic registration if Cognito supports it; otherwise the identity stack's one pre-registered public MCP client and its callback URL allowlist, the only permitted client-specific configuration. `make smoke-aws` signs a synthetic user in through the Cognito hosted UI with PKCE and calls one REST endpoint and the MCP endpoint."
     - [ ] "Web sign-out ends the Cognito session. … sign-out navigates to `/logout?client_id=<web client ID>&logout_uri=<post-sign-out URL>` after the session leaves its signed-in state. `frontend/tests/sign-out.test.tsx` asserts that URL under the Cognito build settings and an unchanged Keycloak sign-out request under the dogfood settings; `make smoke-aws` signs the synthetic user out and a following visit starts a new sign-in."
-- [ ] **Verify:** `make deploy-identity ENV=dogfood` exits non-zero with a refusal. `grep -rni cognito backend/src/property_focus` returns nothing. **Live (explicit user approval required):** `make deploy-identity ENV=staging` with its `cdk diff`; `make smoke-aws ENV=staging` with the Cognito sign-in and sign-out.
+- [ ] **Verify:** `make deploy-identity ENV=dogfood` exits non-zero with a refusal. `grep -rni cognito backend/src/property_focus` returns nothing. **Live (explicit user approval required):** `make deploy-identity ENV=beta` with its `cdk diff`; `make smoke-aws ENV=beta` with the Cognito sign-in and sign-out.
 
 ---
 
@@ -4006,24 +4008,24 @@ docs/operations.md                                       (modify)
 - [ ] **9.8.3** — Send WAF logs to CloudWatch Logs with the `Authorization` header redacted.
 - [ ] **9.8.4** — Set the stage's default throttling (rate and burst) and a tighter method throttle on the `/mcp` resource, both from CDK context.
 - [ ] **9.8.5** — Write `edge.test.ts`: the API is an `AWS::ApiGateway::RestApi` and no `AWS::ApiGatewayV2::Api` exists; a web ACL association targets the API stage; the three managed groups are present; two rate-based rules exist and the `/mcp` one has a scope-down on `/mcp` and the lower limit; logging redacts `authorization`; stage throttling is set and the `/mcp` method throttle is lower.
-- [ ] **9.8.6** — Extend `test_pipeline.py` and `make smoke-aws` (live): the staging stage has the web ACL associated; a burst from one client above the `/mcp` limit gets `429`. Document the WAF and throttling values, how to tune them and how to read WAF logs in `docs/operations.md`.
+- [ ] **9.8.6** — Extend `test_pipeline.py` and `make smoke-aws` (live): the beta stage has the web ACL associated; a burst from one client above the `/mcp` limit gets `429`. Document the WAF and throttling values, how to tune them and how to read WAF logs in `docs/operations.md`.
 
 **Validation:**
 
 - [ ] **Build:** `INFRA` exits 0.
-- [ ] **Tests:** `pnpm --filter @property-focus/infra test --run` passes `edge.test.ts`; `test_pipeline.py` is collected and skipped without staging credentials.
+- [ ] **Tests:** `pnpm --filter @property-focus/infra test --run` passes `edge.test.ts`; `test_pipeline.py` is collected and skipped without beta credentials.
 - [ ] **Requirements:**
     - [ ] "A regional AWS WAF web ACL is associated with the API stage and covers `/v1` and `/mcp`. It holds the AWS managed rule groups … a per-IP rate-based rule over every path, and a tighter per-IP rate-based rule scoped down to `/mcp`, both answering `429` … WAF logs redact the `Authorization` header (`edge.test.ts`)."
     - [ ] "The API stage sets default throttling (rate and burst), and the `/mcp` route has a tighter method throttle, both from CDK context (`edge.test.ts`)."
-    - [ ] "`make smoke-aws ENV=staging` asserts the web ACL is associated with the staging stage, and that a burst from one client above the `/mcp` limit gets `429` (live)."
+    - [ ] "`make smoke-aws ENV=beta` asserts the web ACL is associated with the beta stage, and that a burst from one client above the `/mcp` limit gets `429` (live)."
     - [ ] "`edge.test.ts` fails on any `AWS::ApiGatewayV2::Api`."
-- [ ] **Verify:** `pnpm --filter @property-focus/infra synth` output for the API stack contains one `AWS::WAFv2::WebACLAssociation`. **Live (explicit user approval required):** `make smoke-aws ENV=staging` with the WAF and burst checks.
+- [ ] **Verify:** `pnpm --filter @property-focus/infra synth` output for the API stack contains one `AWS::WAFv2::WebACLAssociation`. **Live (explicit user approval required):** `make smoke-aws ENV=beta` with the WAF and burst checks.
 
 ---
 
 ### Task 9.5: AWS Compatibility, AWS-Side Shadow Runs and Drills
 
-Deploy to isolated staging, exercise the real AWS paths, run shadow evaluation on AWS, and run fault, budget, restore and rollback drills.
+Deploy to isolated beta, exercise the real AWS paths, run shadow evaluation on AWS, and run fault, budget, restore and rollback drills.
 
 **Modules:** all, `docs`
 **Depends on:** 9.4, 9.7, 9.8, CP-9.A
@@ -4039,22 +4041,22 @@ backend/evals/config/baseline.yaml                       (modify)
 
 **Sub-tasks:**
 
-- [ ] **9.5.1** — Deploy CDK stacks into the isolated staging account and run `make smoke-aws ENV=staging` (live; user approval).
+- [ ] **9.5.1** — Deploy CDK stacks into the isolated beta account and run `make smoke-aws ENV=beta` (live; user approval).
 - [ ] **9.5.2** — Record each operation's AWS result next to the MiniStack result in `docs/compatibility.md`; an unsupported emulator operation never counts as an AWS pass.
-- [ ] **9.5.3** — Run AWS-side shadow evaluation (`cli evaluate --mode shadow --no-publish` against staging) and confirm no publication.
+- [ ] **9.5.3** — Run AWS-side shadow evaluation (`cli evaluate --mode shadow --no-publish` against beta) and confirm no publication.
 - [ ] **9.5.4** — Run fault injection (task Lambda failure, SQS redelivery, Step Functions catch paths), confirm budget alarms fire, and measure database concurrency to decide on RDS Proxy.
 - [ ] **9.5.5** — Demonstrate point-in-time database recovery and restoration of evidence references, encryption access and application configuration; run an image rollback; record all reports in `docs/operations.md`.
-- [ ] **9.5.6** — Pipeline drills (live; user approval). Record one merge-triggered `deploy-aws.yml` run that deploys staging and passes the staging checks. Then run the pipeline once with a staging check forced to fail (for example a synthetic failing case that only `backend/tests/aws` reads, selected by an environment variable; plan recommendation) and record that the `production` job was skipped and that production's image digest and stack versions match their values before the run. Before the `production` environment exists (CP-9.A), the drill records that the pipeline ended at the failed check.
+- [ ] **9.5.6** — Pipeline drills (live; user approval). Record one merge-triggered `deploy-aws.yml` run that deploys beta and passes the beta checks. Then run the pipeline once with a beta check forced to fail (for example a synthetic failing case that only `backend/tests/aws` reads, selected by an environment variable; plan recommendation) and record that the `production` job was skipped and that production's image digest and stack versions match their values before the run. Before the `production` environment exists (CP-9.A), the drill records that the pipeline ended at the failed check.
 
 **Validation:**
 
 - [ ] **Build:** `VERIFY` exits 0.
-- [ ] **Tests:** `make smoke-aws ENV=staging` passes (live).
+- [ ] **Tests:** `make smoke-aws ENV=beta` passes (live).
 - [ ] **Requirements:**
     - [ ] "Deploy CDK stacks into an isolated account/environment and exercise S3, SQS redelivery/DLQ, the EventBridge `imap-poll` schedule, Step Functions retries/catches, Lambda auth and Fargate browser launch."
     - [ ] "Before AWS production, the team must demonstrate point-in-time database recovery and restoration of evidence references, encryption access, and application configuration."
     - [ ] "Phase 9 adds AWS-side shadow runs only."
-    - [ ] "A drill at the AWS ready gate forces one staging check to fail and records that the production job was skipped and production's image digest did not change."
+    - [ ] "A drill at the AWS ready gate forces one beta check to fail and records that the production job was skipped and production's image digest did not change."
     - [ ] "Engineers prove service compatibility in real AWS before release" and "Engineers may use Lambda for short, measured browser tasks after a compatibility test, but must not require a browser session to survive a Lambda invocation."
 - [ ] **Verify:** `docs/compatibility.md` has a non-empty AWS result for every row. **Live (explicit user approval required):** all of 9.5.1–9.5.6.
 
@@ -4076,18 +4078,18 @@ specs/property-focus/gates/aws-ready.md                  (create)
 
 **Sub-tasks:**
 
-- [ ] **9.6.1** — Record the CDK diff review (including the identity stack), the AWS staging smoke with Cognito sign-in for REST and MCP, fault injection and budget alarm results.
+- [ ] **9.6.1** — Record the CDK diff review (including the identity stack), the AWS beta smoke with Cognito sign-in for REST and MCP, fault injection and budget alarm results.
 - [ ] **9.6.2** — Record the failure/recovery (restore) and rollback reports.
-- [ ] **9.6.3** — Record the deployment pipeline evidence: `test_deploy_workflows.py` results, the merge-triggered staging run with passing staging checks, and the 9.5.6 failing-check drill showing production skipped and unchanged.
-- [ ] **9.6.4** — Record the edge evidence: `edge.test.ts` results and the staging WAF association and `/mcp` burst check from 9.8.6.
+- [ ] **9.6.3** — Record the deployment pipeline evidence: `test_deploy_workflows.py` results, the merge-triggered beta run with passing beta checks, and the 9.5.6 failing-check drill showing production skipped and unchanged.
+- [ ] **9.6.4** — Record the edge evidence: `edge.test.ts` results and the beta WAF association and `/mcp` burst check from 9.8.6.
 
 **Validation:**
 
 - [ ] **Build:** `VERIFY` exits 0.
 - [ ] **Tests:** All suites pass; live results are linked.
 - [ ] **Requirements:**
-    - [ ] Phase 9 exit: "AWS staging smoke including Cognito sign-in, a pipeline run promoting only after the staging checks pass, a failing-check drill that leaves production untouched, fault injection, budget alarms, restore and rollback reports."
-    - [ ] AWS ready artifacts: "CDK diff review including the identity stack, `edge.test.ts` results and the staging WAF and throttling smoke, `test_deploy_workflows.py` results, a merge-triggered pipeline run that deploys staging and passes the staging checks, the failing-staging-check drill showing production skipped and unchanged, AWS smoke with Cognito sign-in for REST and MCP and Cognito sign-out from the web app, failure/recovery and rollback reports."
-- [ ] **Verify:** `aws-ready.md` links every artifact and records the CP-9.C answer. **Live (explicit user approval required):** `pnpm --filter @property-focus/infra diff --context environment=staging`; `make smoke-aws ENV=staging`.
+    - [ ] Phase 9 exit: "AWS beta smoke including Cognito sign-in, WAF and throttling assertions, a pipeline run promoting only after the beta checks pass and the production approval is given, a failing-check drill that leaves production untouched, fault injection, budget alarms, restore and rollback reports."
+    - [ ] AWS ready artifacts: "CDK diff review including the identity stack, `edge.test.ts` results and the beta WAF and throttling smoke, `test_deploy_workflows.py` results, a merge-triggered pipeline run that deploys beta and passes the beta checks, the failing-beta-check drill showing production skipped and unchanged, AWS smoke with Cognito sign-in for REST and MCP and Cognito sign-out from the web app, failure/recovery and rollback reports."
+- [ ] **Verify:** `aws-ready.md` links every artifact and records the CP-9.C answer. **Live (explicit user approval required):** `pnpm --filter @property-focus/infra diff --context environment=beta`; `make smoke-aws ENV=beta`.
 
 <!-- END OF SPEC -->

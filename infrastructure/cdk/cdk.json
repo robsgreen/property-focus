@@ -18,10 +18,10 @@
           "http://localhost:8976/callback"
         ]
       },
-      "staging": {
+      "beta": {
         "account": null,
         "region": "us-east-1",
-        "hostedUiDomainPrefix": "property-focus-staging",
+        "hostedUiDomainPrefix": "property-focus-beta",
         "webCallbackUrls": [
           "http://localhost:5173/auth/callback"
         ],

@@ -201,38 +201,35 @@ OPERATIONS = [
         "GetSecretValue",
         "`AwsSecretProvider` (`adapters/secrets.py`)",
         secrets_manager_get_secret_value,
-        "botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS staging",
+        "botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS beta",
     ),
     Operation(
         "Systems Manager Parameter Store",
         "GetParameter (SecureString, ParameterNotFound)",
         "`AwsSecretProvider` (`adapters/secrets.py`)",
         ssm_get_parameter,
-        "botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS staging",
+        "botocore Stubber cases in `backend/tests/unit/test_secrets.py`; verify on AWS beta",
     ),
     Operation(
         "Lambda",
         "Invoke (InvocationType Event)",
         "`LambdaTaskLauncher` (`runtime/launcher.py`)",
         lambda_invoke,
-        "botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; "
-        "verify on AWS staging",
+        "botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS beta",
     ),
     Operation(
         "Step Functions",
         "StartExecution (ExecutionAlreadyExists reuse)",
         "`StepFunctionsTaskLauncher` (`runtime/launcher.py`)",
         stepfunctions_start_execution,
-        "botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; "
-        "verify on AWS staging",
+        "botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS beta",
     ),
     Operation(
         "ECS",
         "RunTask (FARGATE launch type)",
         "`FargateTaskLauncher` (`runtime/launcher.py`)",
         ecs_run_task,
-        "botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; "
-        "verify on AWS staging",
+        "botocore Stubber cases in `backend/tests/unit/test_workflow_runs.py`; verify on AWS beta",
     ),
 ]
 
