@@ -1,6 +1,6 @@
 # Foundation Ready Gate
 
-> **Status: OPEN, not closed.** The local evidence (0.12.2, 0.12.4, 0.12.6, 0.12.7) is recorded below and passes. The gate closes only after the items marked **PENDING** are done: 0.12.1 (clean-clone bootstrap on macOS arm64, plus the CI Linux x86_64 log), 0.12.3 (recorded path-aware CI run; needs a push), 0.12.5 (`make smoke-dogfood` through Cloudflare; needs the Cloudflare setup, the Mailgun domain, the deployment secrets and a dogfood deployment), 0.12.8 (Cloudflare dashboard settings, `firewall.sh` and `deploy.sh` preflight output) and the user's Tier 1 review of the MCP SDK adapter (0.12.7). Each needs the user's action or explicit approval.
+> **Status: OPEN, not closed.** The local evidence (0.12.2, 0.12.4, 0.12.6, 0.12.7) is recorded below and passes. The gate closes only after the items marked **PENDING** are done: 0.12.1 (clean-clone bootstrap on macOS arm64, plus the CI Linux x86_64 log), 0.12.3 (recorded path-aware CI run; needs a push), 0.12.5 (`make smoke-dogfood` through Cloudflare; needs the Cloudflare setup, the Mailgun domain, the deployment secrets and a dogfood deployment), 0.12.8 (Cloudflare dashboard settings, `firewall.sh` and `deploy.sh` preflight output) Each needs the user's action or explicit approval.
 
 - **Task:** 0.12 in `specs/property-focus/tasks/task-spec.md`; plan section "Foundation ready gate" artifacts in `specs/property-focus/master-plan.md`.
 - **Recorded:** 2026-11-02, branch `sdlc/property-focus-p0`. **Latest run (0.12.7):** `make verify` and the verbose backend run were rerun at `e8f8982`, after Tasks 0.15 (PyJWT `PyJWKClient`), 0.16 (official MCP SDK adapter) and 0.17 (Cloudflare edge) and the tests added for them; the commit that records them changes only this gate. The two log files now hold that run. **Earlier runs:** `make verify` and the verbose backend run were rerun at `71694cd`, the final code commit after the review fixes (`c734f96`, `6c2fdf5`, `bd1eae5`, `c188e47`, `71694cd`); the commit that records them changes only documentation and this gate. The metadata logs (0.12.6) were recorded at `3eae973`, before the review fixes. The PKCE smoke (0.12.4) was first recorded at `3eae973` and rerun at `dcd06fd`, after the review fixes changed sign-in and sign-out, with a sign-out check added.
@@ -27,7 +27,7 @@
 | Path-aware CI run | [0.12.3](#0123-path-aware-ci-run--pending) | **PENDING (push; user approval)** |
 | Dogfood smoke against the dogfood Keycloak | [0.12.5](#0125-dogfood-smoke--pending) | **PENDING (DNS, Mailgun, secrets, deployment; user approval)** |
 | Same contract suite green on the official MCP SDK adapter with PyJWT's JWKS client (A6) | [0.12.7](#0127-rerun-on-the-mcp-sdk-adapter-and-pyjwkclient) | pass; `mcp` 2.3.0, PyJWT 2.15.1 |
-| User's Tier 1 review of the MCP SDK adapter | [0.12.7](#0127-rerun-on-the-mcp-sdk-adapter-and-pyjwkclient) | **PENDING (user)** |
+| User's Tier 1 review of the MCP SDK adapter | [0.12.7](#0127-rerun-on-the-mcp-sdk-adapter-and-pyjwkclient) | Passed (user, 2026-11-04) |
 | Cloudflare edge: dashboard settings, `firewall.sh`, `deploy.sh` preflight (A5) | [0.12.8](#0128-cloudflare-edge--pending) | **PENDING (Cloudflare and host changes; user approval)** |
 | Compatibility inventory | [`docs/compatibility.md`](../../../docs/compatibility.md) | attached |
 | Keycloak mechanisms (0.13.3, 0.5.7) and option C findings (0.14) | [0.12.6](#0126-compatibility-inventory-and-keycloak-mechanisms) | attached |
@@ -139,9 +139,9 @@ The same three backend suites, rerun with `uv run pytest backend/tests/unit back
 
 **Cloudflare edge, deterministic part (Task 0.17).** `unit/test_dogfood_edge.py` (18 / 18): both Caddy sites serve the origin certificate and no site obtains one by ACME; `trusted_proxies` and the client-IP headers come only from `cloudflare-ips.txt`, `CF-Connecting-IP` first; `deploy.sh` passes exactly the committed ranges; the ranges are valid IPv4 and IPv6 networks; only Caddy publishes ports, over TCP, with the origin directory read-only; the smoke check accepts a response with `cf-ray`, rejects one without, names Bot Fight Mode for a challenge page, and fails when the origin accepts a direct connection.
 
-**User's Tier 1 review of the SDK adapter: PENDING — requires the user.** The wire differences from the hand-written adapter are listed in the Task 0.16 report and above (SDK behaviors accepted under A6); record the user's review here and in `status.md`.
+**User's Tier 1 review of the SDK adapter: passed.** The wire differences from the hand-written adapter are listed in the Task 0.16 report and above (SDK behaviors accepted under A6).
 
-- Tier 1 review: _pending_
+- Tier 1 review: approved by the user on 2026-11-04 ("MCP surface looks good"), covering the SDK adapter and the PR #2 revision in which MCP accepts only the `property-focus-mcp` audience.
 
 ## 0.12.3 Path-aware CI run — PENDING
 

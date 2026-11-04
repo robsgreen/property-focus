@@ -20,7 +20,7 @@ docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' propert
 
 and run the `deploy-dogfood` workflow again (a deploy, not `--rollback`: a rollback does not start Keycloak). `deploy.sh` does not remove the network itself, because that takes the running release down before the deploy has passed its own checks. Every container runs with `no-new-privileges` and without Linux capabilities, except those Postgres needs to prepare its data directory, and Caddy's `NET_BIND_SERVICE` (ports 80 and 443) and `DAC_READ_SEARCH` (to read the origin key, which belongs to the deploy user with mode 600); Keycloak (1.5 GB), Postgres (1 GB) and OpenObserve (1 GB) have memory limits, so the host needs at least 4 GB.
 
-One-time setup by an operator:
+One-time setup by an operator ([dogfood-first-deploy.md](dogfood-first-deploy.md) gives the exact commands for each step, from creating the host to the first smoke check):
 
 1. Create a `deploy` user in the `docker` group whose `authorized_keys` holds the public half of the `DOGFOOD_SSH_PRIVATE_KEY` deployment key.
 2. Create `/srv/property-focus/releases`, `/etc/property-focus` (mode 700) and `/var/lib/property-focus`, all owned by `deploy`.

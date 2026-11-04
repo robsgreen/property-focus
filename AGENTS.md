@@ -61,7 +61,7 @@ Read the doc for the area you touch, then the source.
 | Logs, traces, metrics, redaction | [telemetry](docs/system/modules/telemetry.md) |
 | `frontend/` | [web-app](docs/system/modules/web-app.md) |
 | Compose, images, dogfood, CDK, CI | [infrastructure-and-delivery](docs/system/modules/infrastructure-and-delivery.md) |
-| Dogfood runbooks | [docs/operations.md](docs/operations.md) |
+| Dogfood runbooks | [docs/operations.md](docs/operations.md); first deploy: [docs/dogfood-first-deploy.md](docs/dogfood-first-deploy.md) |
 | MiniStack versus AWS | [docs/compatibility.md](docs/compatibility.md) (generated) |
 
 ## Key Conventions
