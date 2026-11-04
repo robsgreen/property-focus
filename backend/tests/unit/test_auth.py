@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import jwt
@@ -22,6 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from fastapi.testclient import TestClient
 from jwt import PyJWKClient
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from jwt.exceptions import PyJWKClientConnectionError
 from sqlalchemy import Engine
 
 from property_focus.adapters.auth.oidc import (
@@ -43,6 +45,10 @@ from property_focus.config import LOCAL_OIDC_ISSUER, ConfigurationError, Setting
 from property_focus.domain.errors import CodedError
 
 AUDIENCE = "property-focus-api"
+MCP_AUDIENCE = "property-focus-mcp"
+# The audiences the REST API accepts by default, for tests about everything but the audience.
+AUDIENCES = (AUDIENCE,)
+DEPLOYED_ISSUER = "https://auth.example.test/realms/property-focus"
 
 
 @dataclass(frozen=True)
@@ -102,13 +108,19 @@ class KeySetServer:
     delay_seconds: float = 0.0
     # The thread each fetch ran on.
     fetch_threads: list[threading.Thread] = field(default_factory=list)
+    # A body served instead of the published keys, such as a malformed key set; None serves
+    # the keys.
+    body: Any = None
 
-    def key_set(self) -> Mapping[str, Any]:
+    def key_set(self) -> Any:
         self.fetches += 1
         self.fetch_threads.append(threading.current_thread())
         time.sleep(self.delay_seconds)
         if self.unavailable:
-            raise CodedError("dependency_transient", "The identity provider is unavailable.")
+            # What PyJWKClient.fetch_data raises when the request fails.
+            raise PyJWKClientConnectionError("Fail to fetch data from the url")
+        if self.body is not None:
+            return self.body
         return {"keys": [key.jwk for key in self.keys]}
 
 
@@ -131,8 +143,10 @@ def fixture_settings(**overrides: Any) -> Settings:
     )
 
 
-def verify(verifier: OidcVerifier, token: str) -> VerifiedIdentity:
-    return asyncio.run(verifier.verify(token))
+def verify(
+    verifier: OidcVerifier, token: str, audiences: tuple[str, ...] = AUDIENCES
+) -> VerifiedIdentity:
+    return asyncio.run(verifier.verify(token, audiences=audiences))
 
 
 def unsigned_token(header: Mapping[str, Any], claims: Mapping[str, Any]) -> str:
@@ -160,6 +174,49 @@ def clock() -> FakeClock:
 @pytest.fixture
 def verifier(server: KeySetServer, clock: FakeClock) -> OidcVerifier:
     return fixture_verifier(fixture_settings(), server.key_set, clock=clock)
+
+
+@dataclass
+class RedirectingServer:
+    """A loopback HTTP server: ``/redirect`` answers 302 to ``/target``, and each path in
+    ``documents`` answers its JSON. ``paths`` lists every path requested, in order."""
+
+    port: int
+    documents: dict[str, Any] = field(default_factory=dict)
+    paths: list[str] = field(default_factory=list)
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+
+@pytest.fixture
+def redirecting_server() -> Iterator[RedirectingServer]:
+    state = RedirectingServer(port=0)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            state.paths.append(self.path)
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", state.url("/target"))
+                self.end_headers()
+                return
+            body = json.dumps(state.documents.get(self.path, {})).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    state.port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield state
+    server.shutdown()
+    server.server_close()
 
 
 class TestClaims:
@@ -246,17 +303,31 @@ class TestClaims:
         self, server: KeySetServer, key: SigningKey
     ) -> None:
         settings = fixture_settings(
-            oidc_audience=("web-client", "mcp-client"),
-            oidc_audience_claim="client_id",
-            oidc_token_type="token_use=access",
+            oidc_audience_claim="client_id", oidc_token_type="token_use=access"
         )
         verifier = fixture_verifier(settings, server.key_set)
+        clients = ("web-client", "mcp-client")
 
-        verify(verifier, key.sign(aud=None, typ=None, client_id="mcp-client", token_use="access"))
+        verify(
+            verifier,
+            key.sign(aud=None, typ=None, client_id="mcp-client", token_use="access"),
+            clients,
+        )
         with pytest.raises(InvalidTokenError, match="client_id"):
-            verify(verifier, key.sign(typ=None, token_use="access"))
+            verify(verifier, key.sign(typ=None, token_use="access"), clients)
         with pytest.raises(InvalidTokenError, match="not an access token"):
-            verify(verifier, key.sign(aud=None, client_id="web-client", token_use="id"))
+            verify(verifier, key.sign(aud=None, client_id="web-client", token_use="id"), clients)
+
+    def test_a_token_passes_only_for_the_audiences_the_caller_names(
+        self, verifier: OidcVerifier, key: SigningKey
+    ) -> None:
+        mcp_token = key.sign(aud=MCP_AUDIENCE)
+
+        verify(verifier, mcp_token, (MCP_AUDIENCE,))
+        with pytest.raises(InvalidTokenError, match="audience"):
+            verify(verifier, mcp_token, (AUDIENCE,))
+        with pytest.raises(InvalidTokenError, match="audience"):
+            verify(verifier, key.sign(aud=AUDIENCE), (MCP_AUDIENCE,))
 
 
 class TestAlgorithms:
@@ -441,7 +512,9 @@ class TestKeySet:
         self, verifier: OidcVerifier, server: KeySetServer, key: SigningKey
     ) -> None:
         async def verify_many() -> None:
-            await asyncio.gather(*(verifier.verify(key.sign()) for _ in range(20)))
+            await asyncio.gather(
+                *(verifier.verify(key.sign(), audiences=AUDIENCES) for _ in range(20))
+            )
 
         asyncio.run(verify_many())
 
@@ -458,7 +531,9 @@ class TestKeySet:
         tokens = [new_key.sign() for _ in range(20)]
 
         async def verify_many() -> list[VerifiedIdentity]:
-            return await asyncio.gather(*(verifier.verify(token) for token in tokens))
+            return await asyncio.gather(
+                *(verifier.verify(token, audiences=AUDIENCES) for token in tokens)
+            )
 
         identities = asyncio.run(verify_many())
 
@@ -473,7 +548,8 @@ class TestKeySet:
 
         async def verify_many() -> list[BaseException | VerifiedIdentity]:
             return await asyncio.gather(
-                *(verifier.verify(key.sign()) for _ in range(20)), return_exceptions=True
+                *(verifier.verify(key.sign(), audiences=AUDIENCES) for _ in range(20)),
+                return_exceptions=True,
             )
 
         outcomes = asyncio.run(verify_many())
@@ -515,7 +591,9 @@ class TestKeySet:
             loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
             busy = loop.run_in_executor(None, release.wait)
             try:
-                return await asyncio.wait_for(verifier.verify(token), timeout=0.5)
+                return await asyncio.wait_for(
+                    verifier.verify(token, audiences=AUDIENCES), timeout=0.5
+                )
             finally:
                 release.set()
                 await busy
@@ -531,7 +609,7 @@ class TestKeySet:
 
         async def verify_on_loop() -> None:
             loop_threads.append(threading.current_thread())
-            await verifier.verify(key.sign())
+            await verifier.verify(key.sign(), audiences=AUDIENCES)
 
         asyncio.run(verify_on_loop())
 
@@ -548,20 +626,58 @@ class TestKeySet:
         assert raised.value.code == "dependency_transient"
 
     def test_encryption_keys_are_not_signing_keys(
-        self, verifier: OidcVerifier, server: KeySetServer
+        self, server: KeySetServer, key: SigningKey
     ) -> None:
         encryption_key = SigningKey.rsa()
-        server.keys = [encryption_key]
-        original = server.key_set
 
-        def with_enc_use() -> Mapping[str, Any]:
-            document = original()
-            return {"keys": [{**jwk, "use": "enc"} for jwk in document["keys"]]}
+        def with_an_encryption_key() -> Mapping[str, Any]:
+            return {"keys": [key.jwk, {**encryption_key.jwk, "use": "enc"}]}
 
-        verifier = fixture_verifier(fixture_settings(), with_enc_use)
+        verifier = fixture_verifier(fixture_settings(), with_an_encryption_key)
 
+        verify(verifier, key.sign())
         with pytest.raises(InvalidTokenError, match="no signing key"):
             verify(verifier, encryption_key.sign())
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(["not", "an", "object"], id="not-an-object"),
+            pytest.param({"keys": "not-a-list"}, id="keys-not-a-list"),
+            pytest.param({"keys": [{"kty": "unknown", "kid": "k"}]}, id="no-usable-key"),
+            pytest.param({"keys": []}, id="empty"),
+            pytest.param({"keys": [{**SigningKey.rsa().jwk, "use": "enc"}]}, id="no-signing-key"),
+        ],
+    )
+    def test_malformed_key_set_is_a_failed_attempt_that_keeps_the_cached_keys(
+        self,
+        verifier: OidcVerifier,
+        server: KeySetServer,
+        key: SigningKey,
+        clock: FakeClock,
+        body: Any,
+    ) -> None:
+        verify(verifier, key.sign())
+        server.body = body
+        clock.advance(REFETCH_INTERVAL_SECONDS)
+
+        with pytest.raises(CodedError) as raised:
+            verify(verifier, SigningKey.rsa().sign())
+        assert raised.value.code == "dependency_transient"
+        # The previous keys still answer, and the failure is remembered for the interval.
+        verify(verifier, key.sign())
+        with pytest.raises(CodedError):
+            verify(verifier, SigningKey.rsa().sign())
+        assert server.fetches == 2
+
+    def test_malformed_first_key_set_is_a_transient_dependency_failure(
+        self, verifier: OidcVerifier, server: KeySetServer, key: SigningKey
+    ) -> None:
+        server.body = {"keys": []}
+
+        with pytest.raises(CodedError) as raised:
+            verify(verifier, key.sign())
+        assert raised.value.code == "dependency_transient"
 
 
 class TestDecodeOptions:
@@ -735,6 +851,89 @@ class TestIssuers:
             verify(verifier, key.sign(iss=LOCAL_OIDC_ISSUER))
         assert raised.value.code == "dependency_transient"
 
+    def deployed_provider(self, key: SigningKey, jwks_uri: str) -> dict[str, Mapping[str, Any]]:
+        """Documents a deployed (https) issuer publishes, with ``jwks_uri`` in discovery."""
+        return {
+            f"{DEPLOYED_ISSUER}/.well-known/openid-configuration": {
+                "issuer": DEPLOYED_ISSUER,
+                "jwks_uri": jwks_uri,
+            },
+            jwks_uri: {"keys": [key.jwk]},
+        }
+
+    def test_deployed_issuer_keys_come_from_an_https_uri_on_its_host(self, key: SigningKey) -> None:
+        jwks_uri = f"{DEPLOYED_ISSUER}/protocol/openid-connect/certs"
+        requested: list[str] = []
+        verifier = self.configured_verifier(
+            self.deployed_provider(key, jwks_uri),
+            requested,
+            environment="dogfood",
+            oidc_issuer=DEPLOYED_ISSUER,
+        )
+
+        verify(verifier, key.sign(iss=DEPLOYED_ISSUER))
+
+        assert requested[-1] == jwks_uri
+
+    @pytest.mark.parametrize(
+        "jwks_uri",
+        [
+            pytest.param("http://auth.example.test/realms/property-focus/certs", id="http"),
+            pytest.param("https://elsewhere.example.test/certs", id="another-host"),
+            pytest.param("https://auth.example.test:8443/certs", id="another-port"),
+            pytest.param("https://auth.example.test.elsewhere.test/certs", id="host-suffix"),
+        ],
+    )
+    def test_deployed_issuer_refuses_a_key_set_uri_off_https_or_its_host(
+        self, key: SigningKey, jwks_uri: str
+    ) -> None:
+        requested: list[str] = []
+        verifier = self.configured_verifier(
+            self.deployed_provider(key, jwks_uri),
+            requested,
+            environment="dogfood",
+            oidc_issuer=DEPLOYED_ISSUER,
+        )
+
+        with pytest.raises(CodedError) as raised:
+            verify(verifier, key.sign(iss=DEPLOYED_ISSUER))
+        assert raised.value.code == "dependency_transient"
+        assert jwks_uri not in requested
+
+    def test_discovered_key_set_uri_a_client_cannot_be_built_for_is_a_failed_attempt(
+        self, provider: dict[str, Mapping[str, Any]], key: SigningKey
+    ) -> None:
+        discovery_url = f"{LOCAL_OIDC_ISSUER}/.well-known/openid-configuration"
+        provider[discovery_url] = {**provider[discovery_url], "jwks_uri": "file:///etc/passwd"}
+        verifier = self.configured_verifier(provider, [])
+
+        with pytest.raises(CodedError) as raised:
+            verify(verifier, key.sign(iss=LOCAL_OIDC_ISSUER))
+        assert raised.value.code == "dependency_transient"
+
+    def test_discovery_does_not_follow_redirects(
+        self, redirecting_server: RedirectingServer
+    ) -> None:
+        with pytest.raises(CodedError) as raised:
+            asyncio.run(fetch_json(redirecting_server.url("/redirect")))
+
+        assert raised.value.code == "dependency_transient"
+        assert redirecting_server.paths == ["/redirect"]
+
+    def test_key_set_fetch_does_not_follow_redirects(
+        self, redirecting_server: RedirectingServer, key: SigningKey
+    ) -> None:
+        redirecting_server.documents["/target"] = {"keys": [key.jwk]}
+        settings = Settings.model_validate(
+            {"environment": "development", "oidc_jwks_url": redirecting_server.url("/redirect")}
+        )
+
+        with pytest.raises(CodedError) as raised:
+            verify(verifier_for(settings), key.sign(iss=LOCAL_OIDC_ISSUER))
+
+        assert raised.value.code == "dependency_transient"
+        assert redirecting_server.paths == ["/redirect"]
+
     def test_configured_verifier_rejects_fixture_issuer_tokens(
         self, provider: dict[str, Mapping[str, Any]], key: SigningKey
     ) -> None:
@@ -775,7 +974,13 @@ class TestAuthenticate:
     ) -> None:
         with pytest.raises(CodedError) as raised:
             asyncio.run(
-                authenticate(verifier, unreachable_engine, key.sign(), correlation_id="c-1")
+                authenticate(
+                    verifier,
+                    unreachable_engine,
+                    key.sign(),
+                    audiences=AUDIENCES,
+                    correlation_id="c-1",
+                )
             )
         assert raised.value.code == "dependency_transient"
 
@@ -783,7 +988,15 @@ class TestAuthenticate:
         self, verifier: OidcVerifier, unreachable_engine: Engine
     ) -> None:
         with pytest.raises(CodedError) as raised:
-            asyncio.run(authenticate(verifier, unreachable_engine, "nonsense", correlation_id="c"))
+            asyncio.run(
+                authenticate(
+                    verifier,
+                    unreachable_engine,
+                    "nonsense",
+                    audiences=AUDIENCES,
+                    correlation_id="c",
+                )
+            )
         assert raised.value.code == "unauthorized"
 
     def test_a_token_from_an_unknown_key_is_unauthorized(
@@ -794,7 +1007,11 @@ class TestAuthenticate:
         with pytest.raises(CodedError) as raised:
             asyncio.run(
                 authenticate(
-                    verifier, unreachable_engine, SigningKey.rsa().sign(), correlation_id="c"
+                    verifier,
+                    unreachable_engine,
+                    SigningKey.rsa().sign(),
+                    audiences=AUDIENCES,
+                    correlation_id="c",
                 )
             )
         assert raised.value.code == "unauthorized"
@@ -818,14 +1035,49 @@ class TestAuthenticate:
         self, verifier: OidcVerifier, key: SigningKey, unreachable_engine: Engine
     ) -> None:
         app = create_mcp_app(fixture_settings(), engine=unreachable_engine, verifier=verifier)
-        client = TestClient(app)
+        # The development MCP endpoint's allowed host.
+        client = TestClient(app, base_url="http://localhost:8001")
         message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
 
         unavailable = client.post(
-            "/mcp", json=message, headers={"Authorization": f"Bearer {key.sign()}"}
+            "/mcp",
+            json=message,
+            headers={"Authorization": f"Bearer {key.sign(aud=MCP_AUDIENCE)}"},
         )
         rejected = client.post("/mcp", json=message, headers={"Authorization": "Bearer nonsense"})
 
         assert unavailable.status_code == 503
         assert rejected.status_code == 401
         assert 'error="invalid_token"' in rejected.headers["www-authenticate"]
+
+    def test_rest_accepts_only_the_rest_audience(
+        self, verifier: OidcVerifier, key: SigningKey, unreachable_engine: Engine
+    ) -> None:
+        app = create_rest_app(fixture_settings(), engine=unreachable_engine, verifier=verifier)
+        client = TestClient(app)
+
+        def status(audience: str) -> int:
+            token = key.sign(aud=audience)
+            path = f"/v1/workflow-runs/{uuid.uuid4()}"
+            return client.get(path, headers={"Authorization": f"Bearer {token}"}).status_code
+
+        # 503: the token passed and the unreachable database was next.
+        assert status(AUDIENCE) == 503
+        assert status(MCP_AUDIENCE) == 401
+
+    def test_mcp_accepts_only_the_mcp_audience(
+        self, verifier: OidcVerifier, key: SigningKey, unreachable_engine: Engine
+    ) -> None:
+        app = create_mcp_app(fixture_settings(), engine=unreachable_engine, verifier=verifier)
+        # The development MCP endpoint's allowed host.
+        client = TestClient(app, base_url="http://localhost:8001")
+        message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+        def answer(audience: str) -> Any:
+            token = key.sign(aud=audience)
+            return client.post("/mcp", json=message, headers={"Authorization": f"Bearer {token}"})
+
+        rest_token = answer(AUDIENCE)
+        assert answer(MCP_AUDIENCE).status_code == 503
+        assert rest_token.status_code == 401
+        assert 'error="invalid_token"' in rest_token.headers["www-authenticate"]

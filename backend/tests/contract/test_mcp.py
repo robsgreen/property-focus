@@ -16,6 +16,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any
 
@@ -37,7 +38,7 @@ from contract.mcp_client import (
 )
 from property_focus.adapters.auth.oidc import OidcVerifier, verifier_for
 from property_focus.adapters.db.models import Tenant, User, WorkflowRun, WorkflowStep
-from property_focus.adapters.db.repositories import TenantScope, UnitOfWork
+from property_focus.adapters.db.repositories import ServiceScope, TenantScope, UnitOfWork
 from property_focus.adapters.mcp.server import Tool, create_app
 from property_focus.adapters.rest import schemas
 from property_focus.application.context import ExecutionContext
@@ -45,14 +46,9 @@ from property_focus.application.workflows import read_workflow_run, utc_now
 from property_focus.config import Settings
 
 API_AUDIENCE = "property-focus-api"
+MCP_AUDIENCE = "property-focus-mcp"
 # What an initialize request names besides the protocol version, as every revision requires.
 CLIENT_HELLO = {"capabilities": {}, "clientInfo": {"name": "generic-test-client", "version": "0"}}
-
-
-@pytest.fixture
-def web_tokens(keycloak: LocalKeycloak, user: TestUser) -> Tokens:
-    """``user``'s tokens from the web client, for tests about the transport, not sign-in."""
-    return keycloak.pkce_sign_in(user)
 
 
 def realm_client(keycloak: LocalKeycloak, client_id: str) -> dict[str, Any]:
@@ -64,8 +60,8 @@ def realm_client(keycloak: LocalKeycloak, client_id: str) -> dict[str, Any]:
 
 def tenant_of(engine: Engine, tokens: Tokens) -> TenantScope | None:
     """The tenant provisioned for the subject of ``tokens``, or None."""
-    with engine.connect() as connection:
-        row = connection.execute(
+    with UnitOfWork(engine, ServiceScope()) as uow:
+        row = uow.session.execute(
             select(User.id, Tenant.id)
             .join(Tenant, Tenant.owner_user_id == User.id)
             .where(User.issuer == ISSUER, User.subject == tokens.access_claims["sub"])
@@ -126,7 +122,8 @@ def test_dynamically_registered_generic_client_signs_in_and_calls_mcp(
     )
     assert realm_client(keycloak, client_id)["publicClient"] is True
     assert tokens.access_claims["azp"] == client_id
-    assert API_AUDIENCE in tokens.access_claims["aud"]
+    assert MCP_AUDIENCE in tokens.access_claims["aud"]
+    assert API_AUDIENCE not in tokens.access_claims["aud"]
     assert initialized["protocolVersion"] == "2025-11-25"
     assert initialized["capabilities"] == {"tools": {"listChanged": False}}
     assert initialized["serverInfo"]["name"] == "property-focus"
@@ -148,7 +145,7 @@ def test_metadata_offers_registration_without_metadata_documents_and_resource_ke
     assert discovery.authorization_server.metadata_url == (
         "http://localhost:8080/.well-known/oauth-authorization-server/realms/property-focus"
     )
-    assert tokens.access_claims["aud"] == API_AUDIENCE
+    assert tokens.access_claims["aud"] == MCP_AUDIENCE
 
 
 @pytest.fixture
@@ -186,21 +183,21 @@ def test_expired_keycloak_token_is_rejected(
     assert challenge_parameters(response.headers["www-authenticate"])["error"] == "invalid_token"
 
 
-def test_keycloak_token_without_the_api_audience_is_rejected(
+def test_keycloak_token_without_the_mcp_audience_is_rejected(
     keycloak: LocalKeycloak, mcp_client: McpClient, user: TestUser, runtime_engine: Engine
 ) -> None:
     discovery = mcp_client.discover()
     client_id = mcp_client.register(discovery)
     internal_id = realm_client(keycloak, client_id)["id"]
-    (api_scope,) = [
-        scope for scope in keycloak.admin.get("/client-scopes") if scope["name"] == API_AUDIENCE
+    (mcp_scope,) = [
+        scope for scope in keycloak.admin.get("/client-scopes") if scope["name"] == MCP_AUDIENCE
     ]
     keycloak.admin.request(
-        "DELETE", f"/clients/{internal_id}/default-client-scopes/{api_scope['id']}"
+        "DELETE", f"/clients/{internal_id}/default-client-scopes/{mcp_scope['id']}"
     )
     tokens = mcp_client.authorize(discovery, client_id, user)
     audience = tokens.access_claims.get("aud", [])
-    assert API_AUDIENCE not in ([audience] if isinstance(audience, str) else audience)
+    assert MCP_AUDIENCE not in ([audience] if isinstance(audience, str) else audience)
 
     response = mcp_client.post(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, token=tokens.access_token
@@ -211,8 +208,22 @@ def test_keycloak_token_without_the_api_audience_is_rejected(
     assert tenant_of(runtime_engine, tokens) is None
 
 
-def test_transport_is_stateless_json(mcp_client: McpClient, web_tokens: Tokens) -> None:
-    token = web_tokens.access_token
+def test_web_client_token_is_rejected_without_provisioning(
+    mcp_client: McpClient, web_tokens: Tokens, runtime_engine: Engine
+) -> None:
+    assert API_AUDIENCE in web_tokens.access_claims["aud"]
+
+    response = mcp_client.post(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, token=web_tokens.access_token
+    )
+
+    assert response.status_code == 401
+    assert challenge_parameters(response.headers["www-authenticate"])["error"] == "invalid_token"
+    assert tenant_of(runtime_engine, web_tokens) is None
+
+
+def test_transport_is_stateless_json(mcp_client: McpClient, mcp_tokens: Tokens) -> None:
+    token = mcp_tokens.access_token
     version = {"MCP-Protocol-Version": "2025-06-18"}
 
     initialized = mcp_client.post(
@@ -242,9 +253,9 @@ def test_transport_is_stateless_json(mcp_client: McpClient, web_tokens: Tokens) 
 
 
 def test_unknown_method_unknown_tool_and_bad_bodies_are_errors(
-    mcp_client: McpClient, web_tokens: Tokens
+    mcp_client: McpClient, mcp_tokens: Tokens
 ) -> None:
-    token = web_tokens.access_token
+    token = mcp_tokens.access_token
     unknown = mcp_client.post({"jsonrpc": "2.0", "id": 2, "method": "resources/list"}, token=token)
     unknown_tool = mcp_client.post(
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "nope"}},
@@ -275,7 +286,7 @@ def test_unknown_method_unknown_tool_and_bad_bodies_are_errors(
 
 
 def test_initialize_answers_at_most_the_newest_initialize_based_revision(
-    mcp_client: McpClient, web_tokens: Tokens
+    mcp_client: McpClient, mcp_tokens: Tokens
 ) -> None:
     response = mcp_client.post(
         {
@@ -284,7 +295,7 @@ def test_initialize_answers_at_most_the_newest_initialize_based_revision(
             "method": "initialize",
             "params": {"protocolVersion": MODERN_PROTOCOL_VERSION, **CLIENT_HELLO},
         },
-        token=web_tokens.access_token,
+        token=mcp_tokens.access_token,
     )
 
     assert response.status_code == 200
@@ -292,14 +303,14 @@ def test_initialize_answers_at_most_the_newest_initialize_based_revision(
 
 
 def test_unsupported_protocol_version_is_refused_with_the_supported_versions(
-    mcp_client: McpClient, web_tokens: Tokens
+    mcp_client: McpClient, mcp_tokens: Tokens
 ) -> None:
     mcp_client.protocol_version = MODERN_PROTOCOL_VERSION
     message = mcp_client.message("tools/list")
     message["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = "2027-01-01"
     headers = mcp_client.headers(message) | {"MCP-Protocol-Version": "2027-01-01"}
 
-    response = mcp_client.post(message, token=web_tokens.access_token, **headers)
+    response = mcp_client.post(message, token=mcp_tokens.access_token, **headers)
 
     assert response.status_code == 400
     error = response.json()["error"]
@@ -309,7 +320,7 @@ def test_unsupported_protocol_version_is_refused_with_the_supported_versions(
 
 
 def test_revision_2024_11_05_is_served_only_with_a_valid_token(
-    mcp_client: McpClient, web_tokens: Tokens
+    mcp_client: McpClient, mcp_tokens: Tokens
 ) -> None:
     initialize = {
         "jsonrpc": "2.0",
@@ -318,7 +329,7 @@ def test_revision_2024_11_05_is_served_only_with_a_valid_token(
         "params": {"protocolVersion": "2024-11-05", **CLIENT_HELLO},
     }
     version = {"MCP-Protocol-Version": "2024-11-05"}
-    token = web_tokens.access_token
+    token = mcp_tokens.access_token
 
     anonymous = mcp_client.post(initialize)
     initialized = mcp_client.post(initialize, token=token)
@@ -360,7 +371,7 @@ def _set_meta_version(message: dict[str, Any], version: str) -> None:
 )
 def test_modern_request_with_missing_or_mismatched_header_is_refused(
     mcp_client: McpClient,
-    web_tokens: Tokens,
+    mcp_tokens: Tokens,
     tamper: Callable[[dict[str, Any], dict[str, str]], None],
 ) -> None:
     mcp_client.protocol_version = MODERN_PROTOCOL_VERSION
@@ -368,7 +379,7 @@ def test_modern_request_with_missing_or_mismatched_header_is_refused(
     headers = mcp_client.headers(message)
     tamper(message, headers)
 
-    response = mcp_client.post(message, token=web_tokens.access_token, **headers)
+    response = mcp_client.post(message, token=mcp_tokens.access_token, **headers)
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == -32020
@@ -396,14 +407,14 @@ def test_modern_request_with_missing_or_mismatched_header_is_refused(
     ],
 )
 def test_modern_request_without_its_meta_envelope_has_invalid_params(
-    mcp_client: McpClient, web_tokens: Tokens, tamper: Callable[[dict[str, Any]], None]
+    mcp_client: McpClient, mcp_tokens: Tokens, tamper: Callable[[dict[str, Any]], None]
 ) -> None:
     mcp_client.protocol_version = MODERN_PROTOCOL_VERSION
     message = mcp_client.message("tools/call", {"name": "get_workflow_run", "arguments": {}})
     headers = mcp_client.headers(message)
     tamper(message)
 
-    response = mcp_client.post(message, token=web_tokens.access_token, **headers)
+    response = mcp_client.post(message, token=mcp_tokens.access_token, **headers)
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == -32602
@@ -412,13 +423,13 @@ def test_modern_request_without_its_meta_envelope_has_invalid_params(
 
 @pytest.mark.parametrize("method", ["ping", "logging/setLevel", "resources/list"])
 def test_methods_2026_07_28_removed_or_not_served_are_not_found(
-    mcp_client: McpClient, web_tokens: Tokens, method: str
+    mcp_client: McpClient, mcp_tokens: Tokens, method: str
 ) -> None:
     mcp_client.protocol_version = MODERN_PROTOCOL_VERSION
     message = mcp_client.message(method, {"level": "info"} if method == "logging/setLevel" else {})
 
     response = mcp_client.post(
-        message, token=web_tokens.access_token, **mcp_client.headers(message)
+        message, token=mcp_tokens.access_token, **mcp_client.headers(message)
     )
 
     assert response.status_code == 404
@@ -426,14 +437,14 @@ def test_methods_2026_07_28_removed_or_not_served_are_not_found(
 
 
 def test_modern_notification_is_accepted_without_a_body(
-    mcp_client: McpClient, web_tokens: Tokens
+    mcp_client: McpClient, mcp_tokens: Tokens
 ) -> None:
     mcp_client.protocol_version = MODERN_PROTOCOL_VERSION
     notification = mcp_client.message("notifications/cancelled", {"requestId": 1})
     del notification["id"]
 
     response = mcp_client.post(
-        notification, token=web_tokens.access_token, **mcp_client.headers(notification)
+        notification, token=mcp_tokens.access_token, **mcp_client.headers(notification)
     )
 
     assert (response.status_code, response.content) == (202, b"")
@@ -508,7 +519,8 @@ def recording_mcp_client(
 )
 def test_request_from_a_disallowed_host_or_origin_is_rejected_and_runs_no_tool(
     recording_mcp_client: tuple[McpClient, list[ExecutionContext]],
-    web_tokens: Tokens,
+    mcp_tokens: Tokens,
+    runtime_engine: Engine,
     headers: dict[str, str],
 ) -> None:
     client, calls = recording_mcp_client
@@ -518,12 +530,15 @@ def test_request_from_a_disallowed_host_or_origin_is_rejected_and_runs_no_tool(
         "method": "tools/call",
         "params": {"name": "record_call", "arguments": {}},
     }
-    token = web_tokens.access_token
+    token = mcp_tokens.access_token
 
     refused = client.post(call, token=token, **headers)
+    # Refused before the token check, so the new user was not provisioned.
+    provisioned_by_refused = tenant_of(runtime_engine, mcp_tokens)
     own_origin = client.post(call, token=token, Origin="http://testserver")
 
-    assert refused.status_code in (403, 421)
+    assert refused.status_code == (403 if "Origin" in headers else 421)
+    assert provisioned_by_refused is None
     assert own_origin.status_code == 200
     assert own_origin.json()["result"]["structuredContent"] == {"calls": 1}
     assert len(calls) == 1
@@ -533,14 +548,14 @@ def test_issuer_outage_gives_503_not_a_challenge(
     settings: Settings,
     runtime_engine: Engine,
     mcp_client_for: Callable[[TestClient], McpClient],
-    web_tokens: Tokens,
+    mcp_tokens: Tokens,
 ) -> None:
     # Nothing listens on port 1, so the issuer's key set cannot be fetched.
     unreachable = settings.model_copy(update={"oidc_jwks_url": "http://127.0.0.1:1/certs"})
     app = create_app(unreachable, engine=runtime_engine, verifier=verifier_for(unreachable))
     with TestClient(app, raise_server_exceptions=False) as http:
         response = mcp_client_for(http).post(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, token=web_tokens.access_token
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, token=mcp_tokens.access_token
         )
 
     assert response.status_code == 503
@@ -552,10 +567,25 @@ def test_issuer_outage_gives_503_not_a_challenge(
 # --- Parity harness -------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Principal:
+    """One user's access tokens for each surface: the web client's for REST, a dynamically
+    registered client's for MCP. Both name the same subject, so the same tenant."""
+
+    rest_token: str
+    mcp_token: str
+
+    @classmethod
+    def signed_in(cls, keycloak: LocalKeycloak, user: TestUser) -> "Principal":
+        return cls(
+            keycloak.pkce_sign_in(user).access_token, keycloak.mcp_sign_in(user).access_token
+        )
+
+
 def assert_rest_mcp_parity(
     api: TestClient,
     mcp_client: McpClient,
-    token: str,
+    principal: "Principal",
     *,
     rest: tuple[str, str],
     tool: str,
@@ -563,16 +593,16 @@ def assert_rest_mcp_parity(
     json_body: Any = None,
 ) -> Any:
     """Run one use case through REST (``rest`` is the method and path) and the MCP ``tool``
-    for the same principal, assert both give the same canonical result, and return it.
+    for the same ``principal``, assert both give the same canonical result, and return it.
 
     A REST success must equal the tool's structured result. A REST problem must be a tool
     error with the same code; the problem's ``code`` and ``detail`` are returned then.
     """
     method, path = rest
     response = api.request(
-        method, path, json=json_body, headers={"Authorization": f"Bearer {token}"}
+        method, path, json=json_body, headers={"Authorization": f"Bearer {principal.rest_token}"}
     )
-    result = mcp_client.call_tool(tool, arguments, token=token)
+    result = mcp_client.call_tool(tool, arguments, token=principal.mcp_token)
 
     if response.status_code >= 400:
         assert result["isError"] is True, result
@@ -618,11 +648,11 @@ def harness_mcp_client(
 
 @pytest.fixture
 def workflow_run_id(
-    harness_mcp_client: McpClient, web_tokens: Tokens, runtime_engine: Engine
+    harness_mcp_client: McpClient, mcp_tokens: Tokens, runtime_engine: Engine
 ) -> uuid.UUID:
-    """A workflow run with one step, ``load``, in the tenant of ``web_tokens``' user."""
-    harness_mcp_client.initialize(web_tokens.access_token)  # provisions the tenant
-    tenant = tenant_of(runtime_engine, web_tokens)
+    """A workflow run with one step, ``load``, in the tenant of ``mcp_tokens``' user."""
+    harness_mcp_client.initialize(mcp_tokens.access_token)  # provisions the tenant
+    tenant = tenant_of(runtime_engine, mcp_tokens)
     assert tenant is not None
     with UnitOfWork(runtime_engine, tenant) as uow:
         run = uow.repository(WorkflowRun).add(
@@ -634,13 +664,13 @@ def workflow_run_id(
 
 
 def workflow_run_parity(
-    api: TestClient, mcp_client: McpClient, token: str, run_id: uuid.UUID
+    api: TestClient, mcp_client: McpClient, principal: Principal, run_id: uuid.UUID
 ) -> Any:
     """``assert_rest_mcp_parity`` for reading the workflow run ``run_id``."""
     return assert_rest_mcp_parity(
         api,
         mcp_client,
-        token,
+        principal,
         rest=("GET", f"/v1/workflow-runs/{run_id}"),
         tool="get_workflow_run",
         arguments={"run_id": str(run_id)},
@@ -652,17 +682,19 @@ def test_parity_harness_compares_rest_and_mcp_results(
     api: TestClient,
     harness_mcp_client: McpClient,
     keycloak: LocalKeycloak,
-    web_tokens: Tokens,
+    user: TestUser,
+    mcp_tokens: Tokens,
     workflow_run_id: uuid.UUID,
     protocol_version: str,
 ) -> None:
-    token = web_tokens.access_token
-    other_token = keycloak.pkce_sign_in(keycloak.create_user()).access_token
+    token = mcp_tokens.access_token
+    principal = Principal.signed_in(keycloak, user)
+    other = Principal.signed_in(keycloak, keycloak.create_user())
     harness_mcp_client.protocol_version = protocol_version
 
-    found = workflow_run_parity(api, harness_mcp_client, token, workflow_run_id)
-    hidden = workflow_run_parity(api, harness_mcp_client, other_token, workflow_run_id)
-    missing = workflow_run_parity(api, harness_mcp_client, token, uuid.uuid4())
+    found = workflow_run_parity(api, harness_mcp_client, principal, workflow_run_id)
+    hidden = workflow_run_parity(api, harness_mcp_client, other, workflow_run_id)
+    missing = workflow_run_parity(api, harness_mcp_client, principal, uuid.uuid4())
 
     assert found["id"] == str(workflow_run_id)
     assert [step["name"] for step in found["steps"]] == ["load"]
@@ -679,16 +711,20 @@ def test_parity_harness_compares_rest_and_mcp_results(
 def test_initialize_based_client_lists_and_calls_tools(
     api: TestClient,
     harness_mcp_client: McpClient,
-    web_tokens: Tokens,
+    keycloak: LocalKeycloak,
+    user: TestUser,
+    mcp_tokens: Tokens,
     workflow_run_id: uuid.UUID,
     protocol_version: str,
 ) -> None:
-    token = web_tokens.access_token
+    token = mcp_tokens.access_token
     harness_mcp_client.protocol_version = protocol_version
 
     initialized = harness_mcp_client.initialize(token)
     listed = harness_mcp_client.request("tools/list", token=token)
-    found = workflow_run_parity(api, harness_mcp_client, token, workflow_run_id)
+    found = workflow_run_parity(
+        api, harness_mcp_client, Principal.signed_in(keycloak, user), workflow_run_id
+    )
 
     assert initialized["protocolVersion"] == protocol_version
     assert [tool["name"] for tool in listed["tools"]] == ["get_workflow_run"]
@@ -697,11 +733,11 @@ def test_initialize_based_client_lists_and_calls_tools(
 
 
 def test_modern_client_gets_the_same_results_with_and_without_discovery(
-    harness_mcp_client: McpClient, web_tokens: Tokens, workflow_run_id: uuid.UUID
+    harness_mcp_client: McpClient, mcp_tokens: Tokens, workflow_run_id: uuid.UUID
 ) -> None:
     client = harness_mcp_client
     client.protocol_version = MODERN_PROTOCOL_VERSION
-    token = web_tokens.access_token
+    token = mcp_tokens.access_token
     arguments = {"run_id": str(workflow_run_id)}
 
     listed = client.request("tools/list", token=token)
@@ -736,7 +772,7 @@ def test_modern_client_gets_the_same_results_with_and_without_discovery(
 
 
 def test_modern_tool_call_accepts_a_base64_encoded_tool_name(
-    harness_mcp_client: McpClient, web_tokens: Tokens, workflow_run_id: uuid.UUID
+    harness_mcp_client: McpClient, mcp_tokens: Tokens, workflow_run_id: uuid.UUID
 ) -> None:
     client = harness_mcp_client
     client.protocol_version = MODERN_PROTOCOL_VERSION
@@ -747,7 +783,7 @@ def test_modern_tool_call_accepts_a_base64_encoded_tool_name(
     headers = client.headers(message)
     headers["Mcp-Name"] = f"=?base64?{base64.b64encode(b'get_workflow_run').decode()}?="
 
-    response = client.post(message, token=web_tokens.access_token, **headers)
+    response = client.post(message, token=mcp_tokens.access_token, **headers)
 
     assert response.status_code == 200
     assert response.json()["result"]["structuredContent"]["id"] == str(workflow_run_id)
@@ -764,16 +800,16 @@ def test_modern_tool_call_accepts_a_base64_encoded_tool_name(
 )
 def test_invalid_tool_arguments_are_an_invalid_input_tool_error_in_every_era(
     harness_mcp_client: McpClient,
-    web_tokens: Tokens,
+    mcp_tokens: Tokens,
     protocol_version: str,
     arguments: dict[str, Any],
 ) -> None:
     harness_mcp_client.protocol_version = protocol_version
     if protocol_version != MODERN_PROTOCOL_VERSION:
-        harness_mcp_client.initialize(web_tokens.access_token)
+        harness_mcp_client.initialize(mcp_tokens.access_token)
 
     result = harness_mcp_client.call_tool(
-        "get_workflow_run", arguments, token=web_tokens.access_token
+        "get_workflow_run", arguments, token=mcp_tokens.access_token
     )
 
     assert result["isError"] is True

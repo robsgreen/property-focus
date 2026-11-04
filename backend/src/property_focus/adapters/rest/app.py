@@ -102,6 +102,8 @@ def create_app(
     if engine is not None:
         app.state.engine = engine
     app.state.verifier = verifier or verifier_for(settings)
+    # The API accepts only tokens issued for it (PF_OIDC_AUDIENCE), never MCP client tokens.
+    app.state.audiences = settings.oidc_audience
     app.add_middleware(CorrelationIdMiddleware)
     app.add_exception_handler(CodedError, _coded_error)
     app.add_exception_handler(RequestValidationError, _malformed_request)

@@ -5,7 +5,9 @@
 - ``create_user()`` creates a synthetic user with a verified email through the admin API;
 - ``pkce_sign_in(user)`` runs the authorization code flow with PKCE ``S256`` by submitting
   Keycloak's login form over HTTP and exchanging the code, and caches the tokens for the
-  session;
+  session; its tokens come from the web client, so they carry the REST API's audience;
+- ``mcp_sign_in(user)`` does the same through one dynamically registered public client,
+  so its tokens carry the MCP server's audience, as an MCP client's do;
 - ``register_client(metadata)`` calls the dynamic client registration endpoint that the
   realm's discovery document names.
 
@@ -40,6 +42,9 @@ KEYCLOAK_URL = "http://localhost:8080"
 REALM = "property-focus"
 ISSUER = f"{KEYCLOAK_URL}/realms/{REALM}"
 WEB_CLIENT_ID = "property-focus-web"
+# Where the session's dynamically registered MCP client receives its authorization code.
+# Nothing listens there: the scripted sign-in reads the code from the redirect.
+MCP_REDIRECT_URI = "http://127.0.0.1:43119/callback"
 MAILPIT_URL = "http://localhost:8025"
 
 # Tokens this close to expiry are replaced rather than handed out.
@@ -282,8 +287,17 @@ class OidcRealm:
         }
         return f"{self.discovery['authorization_endpoint']}?{urllib.parse.urlencode(query)}"
 
-    def sign_in(self, email: str, password: str, *, client_id: str, redirect_uri: str) -> Tokens:
-        """Sign in through the login form with PKCE ``S256``, granting consent if asked.
+    def sign_in(
+        self,
+        email: str,
+        password: str,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        scope: str = "openid",
+    ) -> Tokens:
+        """Sign in through the login form with PKCE ``S256`` asking for ``scope``, granting
+        consent if asked.
 
         Raises ``NoAuthorizationCodeError`` showing the last page when no authorization code
         arrives, for example while the user's email is unverified.
@@ -291,7 +305,11 @@ class OidcRealm:
         browser = Browser()
         pkce = Pkce.new()
         url = self.authorization_url(
-            client_id, redirect_uri, code_challenge=pkce.challenge, code_challenge_method="S256"
+            client_id,
+            redirect_uri,
+            scope=scope,
+            code_challenge=pkce.challenge,
+            code_challenge_method="S256",
         )
         response = self.submit_login(browser, browser.get(url), email, password, redirect_uri)
         if response.status == 200 and "login-actions/consent" in response.body:
@@ -451,6 +469,27 @@ class LocalKeycloak:
             )
             self._tokens[key] = cached
         return cached
+
+    def mcp_sign_in(self, user: TestUser) -> Tokens:
+        """Return ``user``'s tokens from the session's dynamically registered MCP client,
+        signing in (and granting consent) only when none are fresh."""
+        return self.pkce_sign_in(user, client_id=self._mcp_client_id, redirect_uri=MCP_REDIRECT_URI)
+
+    @cached_property
+    def _mcp_client_id(self) -> str:
+        """A public loopback client registered anonymously, as MCP clients register."""
+        registration = self.register_client(
+            {
+                "client_name": "Synthetic MCP client",
+                "redirect_uris": [MCP_REDIRECT_URI],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            }
+        )
+        assert registration.status == 201, registration.metadata
+        client_id: str = registration.metadata["client_id"]
+        return client_id
 
     def register_client(self, metadata: Mapping[str, Any]) -> Registration:
         """Register a client anonymously at the realm's advertised registration endpoint."""

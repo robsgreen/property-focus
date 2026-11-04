@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt import PyJWKClient
 from sqlalchemy import Engine
-from support.keycloak import LocalKeycloak, Tokens
+from support.keycloak import LocalKeycloak, TestUser, Tokens
 
 from contract.mcp_client import McpClient
 from property_focus.adapters.auth.oidc import OidcVerifier, fetch_json, verifier_for
@@ -43,8 +43,20 @@ class CountingClient(PyJWKClient):
 
 
 @pytest.fixture(scope="module")
-def realm_tokens(keycloak: LocalKeycloak) -> Tokens:
-    return keycloak.pkce_sign_in(keycloak.create_user())
+def realm_user(keycloak: LocalKeycloak) -> TestUser:
+    return keycloak.create_user()
+
+
+@pytest.fixture(scope="module")
+def realm_tokens(keycloak: LocalKeycloak, realm_user: TestUser) -> Tokens:
+    """The user's tokens from the web client, for REST."""
+    return keycloak.pkce_sign_in(realm_user)
+
+
+@pytest.fixture(scope="module")
+def realm_mcp_tokens(keycloak: LocalKeycloak, realm_user: TestUser) -> Tokens:
+    """The same user's tokens from a dynamically registered client, for MCP."""
+    return keycloak.mcp_sign_in(realm_user)
 
 
 def serve(
@@ -89,7 +101,7 @@ def signed_with_unknown_kid(claims: Mapping[str, Any], key: rsa.RSAPrivateKey) -
 
 
 def test_a_flood_of_unknown_key_ids_is_refused_with_at_most_one_key_set_fetch(
-    settings: Settings, adapters_for: Any, realm_tokens: Tokens
+    settings: Settings, adapters_for: Any, realm_tokens: Tokens, realm_mcp_tokens: Tokens
 ) -> None:
     CountingClient.fetches = 0
     rest, mcp_client = adapters_for(verifier_for(settings, jwks_client_type=CountingClient))
@@ -101,7 +113,8 @@ def test_a_flood_of_unknown_key_ids_is_refused_with_at_most_one_key_set_fetch(
         rest_status(rest, signed_with_unknown_kid(realm_tokens.access_claims, attacker_key))
         if index % 2
         else mcp_client.post(
-            TOOLS_LIST, token=signed_with_unknown_kid(realm_tokens.access_claims, attacker_key)
+            TOOLS_LIST,
+            token=signed_with_unknown_kid(realm_mcp_tokens.access_claims, attacker_key),
         ).status_code
         for index in range(UNKNOWN_KID_TOKENS)
     ]
@@ -109,7 +122,7 @@ def test_a_flood_of_unknown_key_ids_is_refused_with_at_most_one_key_set_fetch(
     assert statuses == [401] * UNKNOWN_KID_TOKENS
     assert CountingClient.fetches - fetches_before_flood <= 1
     assert rest_status(rest, realm_tokens.access_token) == 404
-    assert mcp_client.post(TOOLS_LIST, token=realm_tokens.access_token).status_code == 200
+    assert mcp_client.post(TOOLS_LIST, token=realm_mcp_tokens.access_token).status_code == 200
 
 
 async def _discovery_naming_another_issuer(url: str) -> Mapping[str, Any]:
@@ -145,7 +158,11 @@ def unreachable_discovery(settings: Settings) -> OidcVerifier:
     ids=["key-set-unreachable", "discovery-names-another-issuer", "discovery-unreachable"],
 )
 def test_provider_that_cannot_vouch_for_a_token_gives_503_on_rest_and_mcp(
-    settings: Settings, adapters_for: Any, realm_tokens: Tokens, broken_provider: Any
+    settings: Settings,
+    adapters_for: Any,
+    realm_tokens: Tokens,
+    realm_mcp_tokens: Tokens,
+    broken_provider: Any,
 ) -> None:
     rest, mcp_client = adapters_for(broken_provider(settings))
 
@@ -153,7 +170,7 @@ def test_provider_that_cannot_vouch_for_a_token_gives_503_on_rest_and_mcp(
         f"/v1/workflow-runs/{uuid.uuid4()}",
         headers={"Authorization": f"Bearer {realm_tokens.access_token}"},
     )
-    mcp_response = mcp_client.post(TOOLS_LIST, token=realm_tokens.access_token)
+    mcp_response = mcp_client.post(TOOLS_LIST, token=realm_mcp_tokens.access_token)
 
     assert rest_response.status_code == 503, rest_response.text
     assert rest_response.headers["content-type"] == "application/problem+json"
@@ -163,16 +180,16 @@ def test_provider_that_cannot_vouch_for_a_token_gives_503_on_rest_and_mcp(
 
 
 def test_with_the_provider_up_a_valid_token_is_served_and_an_invalid_one_gets_401(
-    settings: Settings, adapters_for: Any, realm_tokens: Tokens
+    settings: Settings, adapters_for: Any, realm_tokens: Tokens, realm_mcp_tokens: Tokens
 ) -> None:
     rest, mcp_client = adapters_for(verifier_for(settings))
-    tampered = realm_tokens.access_token[:-4] + (
-        "AAAA" if not realm_tokens.access_token.endswith("AAAA") else "BBBB"
-    )
+
+    def tampered(token: str) -> str:
+        return token[:-4] + ("AAAA" if not token.endswith("AAAA") else "BBBB")
 
     assert rest_status(rest, realm_tokens.access_token) == 404
-    assert mcp_client.post(TOOLS_LIST, token=realm_tokens.access_token).status_code == 200
-    assert rest_status(rest, tampered) == 401
-    invalid = mcp_client.post(TOOLS_LIST, token=tampered)
+    assert mcp_client.post(TOOLS_LIST, token=realm_mcp_tokens.access_token).status_code == 200
+    assert rest_status(rest, tampered(realm_tokens.access_token)) == 401
+    invalid = mcp_client.post(TOOLS_LIST, token=tampered(realm_mcp_tokens.access_token))
     assert invalid.status_code == 401
     assert "resource_metadata" in invalid.headers["www-authenticate"]

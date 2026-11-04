@@ -18,6 +18,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
+from jwt.exceptions import PyJWKClientConnectionError
 from pydantic import BaseModel
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
@@ -49,6 +50,7 @@ CALLER = ExecutionContext(
     roles=frozenset(),
 )
 MCP_URL = "http://localhost:8001/mcp"
+MCP_AUDIENCE = "property-focus-mcp"
 
 
 def settings(**overrides: Any) -> Settings:
@@ -62,7 +64,7 @@ def sign(**overrides: Any) -> str:
     claims = {
         "iss": FIXTURE_ISSUER,
         "sub": "subject-1",
-        "aud": "property-focus-api",
+        "aud": MCP_AUDIENCE,
         "typ": "Bearer",
         "scope": "openid email",
         "iat": now,
@@ -78,7 +80,8 @@ def key_set() -> dict[str, Any]:
 
 
 def unavailable_key_set() -> dict[str, Any]:
-    raise CodedError("dependency_transient", "The identity provider is unavailable.")
+    # What PyJWKClient.fetch_data raises when the request fails.
+    raise PyJWKClientConnectionError("Fail to fetch data from the url")
 
 
 @pytest.fixture
@@ -110,7 +113,7 @@ class TestSharedTokenVerifier:
     ) -> None:
         token = sign()
         token_verifier = SharedTokenVerifier(
-            verifier, lambda: engine, clock_skew_seconds=SKEW_SECONDS
+            verifier, lambda: engine, audiences=(MCP_AUDIENCE,), clock_skew_seconds=SKEW_SECONDS
         )
 
         access = verify_token(token_verifier, token)
@@ -127,6 +130,7 @@ class TestSharedTokenVerifier:
         [
             pytest.param("not-a-token", id="malformed"),
             pytest.param(sign(aud="some-other-api"), id="wrong-audience"),
+            pytest.param(sign(aud="property-focus-api"), id="rest-api-audience"),
             pytest.param(sign(exp=int(time.time()) - 3600), id="expired"),
         ],
     )
@@ -134,7 +138,7 @@ class TestSharedTokenVerifier:
         self, verifier: OidcVerifier, engine: Engine, token: str
     ) -> None:
         token_verifier = SharedTokenVerifier(
-            verifier, lambda: engine, clock_skew_seconds=SKEW_SECONDS
+            verifier, lambda: engine, audiences=(MCP_AUDIENCE,), clock_skew_seconds=SKEW_SECONDS
         )
 
         assert verify_token(token_verifier, token) is None
@@ -144,7 +148,7 @@ class TestSharedTokenVerifier:
     ) -> None:
         verifier = fixture_verifier(settings(), unavailable_key_set)
         token_verifier = SharedTokenVerifier(
-            verifier, lambda: engine, clock_skew_seconds=SKEW_SECONDS
+            verifier, lambda: engine, audiences=(MCP_AUDIENCE,), clock_skew_seconds=SKEW_SECONDS
         )
 
         with pytest.raises(IdentityUnavailableError):
@@ -158,7 +162,7 @@ class TestSharedTokenVerifier:
 
         monkeypatch.setattr(oidc, "resolve_context", unreachable)
         token_verifier = SharedTokenVerifier(
-            verifier, lambda: engine, clock_skew_seconds=SKEW_SECONDS
+            verifier, lambda: engine, audiences=(MCP_AUDIENCE,), clock_skew_seconds=SKEW_SECONDS
         )
 
         with pytest.raises(IdentityUnavailableError):
@@ -186,6 +190,45 @@ class TestConfiguration:
         assert security.enable_dns_rebinding_protection is True
         assert security.allowed_hosts == ["app.example.test"]
         assert security.allowed_origins == ["https://app.example.test"]
+
+
+class TestTransportSecurity:
+    @pytest.mark.parametrize(
+        ("headers", "status"),
+        [
+            pytest.param({"Origin": "http://attacker.example.test"}, 403, id="foreign-origin"),
+            pytest.param({"Host": "attacker.example.test"}, 421, id="foreign-host"),
+        ],
+    )
+    def test_disallowed_host_or_origin_is_refused_before_the_token_is_checked(
+        self,
+        verifier: OidcVerifier,
+        engine: Engine,
+        monkeypatch: pytest.MonkeyPatch,
+        headers: dict[str, str],
+        status: int,
+    ) -> None:
+        resolved: list[Any] = []
+
+        def resolve(engine: Engine, identity: Any, **_: Any) -> ExecutionContext:
+            resolved.append(identity)
+            return CALLER
+
+        monkeypatch.setattr(oidc, "resolve_context", resolve)
+        app = create_app(settings(), engine=engine, verifier=verifier)
+        listing = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+        with TestClient(app, base_url="http://localhost:8001") as client:
+            refused = client.post(
+                "/mcp", json=listing, headers={"Authorization": f"Bearer {sign()}", **headers}
+            )
+            unsigned = client.post("/mcp", json=listing, headers=headers)
+
+        assert refused.status_code == status
+        # Refused for the header alone: no sign-in challenge, and no caller was provisioned.
+        assert unsigned.status_code == status
+        assert "www-authenticate" not in unsigned.headers
+        assert resolved == []
 
 
 class TestLogging:

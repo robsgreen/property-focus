@@ -28,7 +28,8 @@ Every backend process reads its deployment choices from `PF_*` environment varia
 | `PF_MIGRATION_DATABASE_URL` | `migration_database_url` | `postgresql+psycopg://pf_migrator@localhost:5432/property_focus` | Migration owner. Must not contain a password |
 | `PF_OIDC_ISSUER` | `oidc_issuer` | `http://localhost:8080/realms/property-focus` in development only | Required and `https` elsewhere |
 | `PF_OIDC_JWKS_URL` | `oidc_jwks_url` | from discovery | Backchannel override (Compose service name); `https` outside development |
-| `PF_OIDC_AUDIENCE` | `oidc_audience` | `property-focus-api` | Comma-separated; a token passes with any one |
+| `PF_OIDC_AUDIENCE` | `oidc_audience` | `property-focus-api` | Audiences the REST API accepts (the realm gives `property-focus-api` to the web client only). Comma-separated; a token passes with any one |
+| `PF_MCP_AUDIENCE` | `mcp_audience` | `property-focus-mcp` | Audiences the MCP server accepts (the realm gives `property-focus-mcp` to dynamically registered clients). Comma-separated; must share no value with `PF_OIDC_AUDIENCE`, so a token is accepted by one surface only. The defaults hold in every environment, dogfood included |
 | `PF_OIDC_AUDIENCE_CLAIM` | `oidc_audience_claim` | `aud` | `client_id` for Cognito |
 | `PF_OIDC_TOKEN_TYPE` | `oidc_token_type` | `typ=Bearer` | `claim=value`; Cognito uses `token_use=access` |
 | `PF_OIDC_ALGORITHMS` | `oidc_algorithms` | `RS256,ES256` | Subset of `SUPPORTED_TOKEN_ALGORITHMS`; `HS*` and `none` are never accepted |

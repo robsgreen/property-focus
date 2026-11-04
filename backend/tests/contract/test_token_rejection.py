@@ -1,10 +1,12 @@
 """Both adapters, REST and MCP, refuse every kind of bad bearer token the same way.
 
 Each bad token differs from an accepted one in exactly one respect. The accepted token
-copies the claims of a real access token from the local Keycloak realm and is signed by an
-extra key added to the realm's published key set as the applications fetch it, so the
-expiry, issuer, audience and token-type cases can be built; the algorithm cases use the
-realm's own published key. A refused token provisions no tenant.
+copies the claims of a real access token from the local Keycloak realm (the web client's
+for REST, a dynamically registered client's for MCP) and is signed by an extra key added to
+the realm's published key set as the applications fetch it, so the expiry, issuer, audience
+and token-type cases can be built; the algorithm cases use the realm's own published key.
+A token for the other surface's audience is refused too. A refused token provisions no
+tenant.
 """
 
 import asyncio
@@ -30,6 +32,7 @@ from support.keycloak import ISSUER, LocalKeycloak
 from contract.mcp_client import McpClient, challenge_parameters
 from property_focus.adapters.auth.oidc import fetch_json, verifier_for
 from property_focus.adapters.db.models import User
+from property_focus.adapters.db.repositories import ServiceScope, UnitOfWork
 from property_focus.adapters.mcp.server import create_app as create_mcp_app
 from property_focus.adapters.rest.app import create_app as create_rest_app
 from property_focus.config import Settings
@@ -70,8 +73,14 @@ class ClientWithAddedKey(PyJWKClient):
 
 @pytest.fixture(scope="module")
 def realm_claims(keycloak: LocalKeycloak) -> dict[str, Any]:
-    """The claims of a real access token from the realm's web client."""
+    """The claims of a real access token from the realm's web client, for REST."""
     return keycloak.pkce_sign_in(keycloak.create_user()).access_claims
+
+
+@pytest.fixture(scope="module")
+def realm_mcp_claims(keycloak: LocalKeycloak) -> dict[str, Any]:
+    """The claims of a real access token from a dynamically registered client, for MCP."""
+    return keycloak.mcp_sign_in(keycloak.create_user()).access_claims
 
 
 @pytest.fixture(scope="module")
@@ -157,9 +166,9 @@ def fresh_claims(realm_claims: dict[str, Any]) -> dict[str, Any]:
 
 
 def users_with_subject(engine: Engine, subject: str) -> int:
-    with engine.connect() as connection:
+    with UnitOfWork(engine, ServiceScope()) as uow:
         return len(
-            connection.execute(
+            uow.session.execute(
                 select(User.id).where(User.issuer == ISSUER, User.subject == subject)
             ).all()
         )
@@ -169,20 +178,22 @@ def test_token_with_the_realm_claims_signed_by_a_published_key_is_accepted_by_bo
     adapters: tuple[TestClient, TestClient],
     mcp_client_for: Callable[[TestClient], McpClient],
     realm_claims: dict[str, Any],
+    realm_mcp_claims: dict[str, Any],
     runtime_engine: Engine,
 ) -> None:
     rest, mcp = adapters
-    claims = fresh_claims(realm_claims)
-    token = sign(claims)
+    rest_claims, mcp_claims = fresh_claims(realm_claims), fresh_claims(realm_mcp_claims)
 
     rest_response = rest.get(
-        f"/v1/workflow-runs/{uuid.uuid4()}", headers={"Authorization": f"Bearer {token}"}
+        f"/v1/workflow-runs/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {sign(rest_claims)}"},
     )
-    mcp_response = mcp_client_for(mcp).post(TOOLS_LIST, token=token)
+    mcp_response = mcp_client_for(mcp).post(TOOLS_LIST, token=sign(mcp_claims))
 
     assert rest_response.status_code == 404, rest_response.text
     assert mcp_response.status_code == 200, mcp_response.text
-    assert users_with_subject(runtime_engine, claims["sub"]) == 1
+    assert users_with_subject(runtime_engine, rest_claims["sub"]) == 1
+    assert users_with_subject(runtime_engine, mcp_claims["sub"]) == 1
 
 
 @pytest.mark.parametrize("make_token", BAD_TOKENS.values(), ids=BAD_TOKENS.keys())
@@ -190,18 +201,21 @@ def test_bad_token_is_refused_by_rest_and_mcp_without_provisioning(
     adapters: tuple[TestClient, TestClient],
     mcp_client_for: Callable[[TestClient], McpClient],
     realm_claims: dict[str, Any],
+    realm_mcp_claims: dict[str, Any],
     realm_public_key_pem: bytes,
     runtime_engine: Engine,
     make_token: TokenMaker,
 ) -> None:
     rest, mcp = adapters
-    claims = fresh_claims(realm_claims)
-    token = make_token(claims, realm_public_key_pem)
+    rest_claims, mcp_claims = fresh_claims(realm_claims), fresh_claims(realm_mcp_claims)
 
     rest_response = rest.get(
-        f"/v1/workflow-runs/{uuid.uuid4()}", headers={"Authorization": f"Bearer {token}"}
+        f"/v1/workflow-runs/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {make_token(rest_claims, realm_public_key_pem)}"},
     )
-    mcp_response = mcp_client_for(mcp).post(TOOLS_LIST, token=token)
+    mcp_response = mcp_client_for(mcp).post(
+        TOOLS_LIST, token=make_token(mcp_claims, realm_public_key_pem)
+    )
 
     assert rest_response.status_code == 401, rest_response.text
     assert rest_response.headers["content-type"] == "application/problem+json"
@@ -209,4 +223,31 @@ def test_bad_token_is_refused_by_rest_and_mcp_without_provisioning(
     assert mcp_response.status_code == 401, mcp_response.text
     challenge = challenge_parameters(mcp_response.headers["www-authenticate"])
     assert challenge["error"] == "invalid_token"
-    assert users_with_subject(runtime_engine, claims["sub"]) == 0
+    assert users_with_subject(runtime_engine, rest_claims["sub"]) == 0
+    assert users_with_subject(runtime_engine, mcp_claims["sub"]) == 0
+
+
+def test_a_token_for_the_other_surface_is_refused_by_each_without_provisioning(
+    adapters: tuple[TestClient, TestClient],
+    mcp_client_for: Callable[[TestClient], McpClient],
+    realm_claims: dict[str, Any],
+    realm_mcp_claims: dict[str, Any],
+    runtime_engine: Engine,
+) -> None:
+    rest, mcp = adapters
+    rest_claims, mcp_claims = fresh_claims(realm_claims), fresh_claims(realm_mcp_claims)
+
+    # A web client token at MCP, and an MCP client token at REST.
+    mcp_response = mcp_client_for(mcp).post(TOOLS_LIST, token=sign(rest_claims))
+    rest_response = rest.get(
+        f"/v1/workflow-runs/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {sign(mcp_claims)}"},
+    )
+
+    assert mcp_response.status_code == 401, mcp_response.text
+    challenge = challenge_parameters(mcp_response.headers["www-authenticate"])
+    assert challenge["error"] == "invalid_token"
+    assert rest_response.status_code == 401, rest_response.text
+    assert rest_response.json()["code"] == "unauthorized"
+    assert users_with_subject(runtime_engine, rest_claims["sub"]) == 0
+    assert users_with_subject(runtime_engine, mcp_claims["sub"]) == 0

@@ -13,16 +13,20 @@ This module binds the SDK to the application:
   in-process in a worker thread, never through the REST API; a ``CodedError`` it raises
   becomes a tool error result with the body ``{"code", "detail"}``, and any other exception
   is logged and answered with a generic JSON-RPC internal error.
-- Sign-in. Every request needs a bearer access token, checked by the same
-  ``oidc.authenticate`` as REST, which also resolves the caller's tenant
-  (``SharedTokenVerifier``). A request without a valid token gets the SDK's ``401``
-  challenge naming the protected-resource metadata, which names ``PF_OIDC_ISSUER`` and is
-  served at ``/.well-known/oauth-protected-resource/mcp`` and at the root form
+- Sign-in. Every request needs a bearer access token for the MCP audience
+  (``PF_MCP_AUDIENCE``), which the realm gives dynamically registered clients; a token
+  for the REST API's audience is refused. It is checked by the same ``oidc.authenticate``
+  as REST, which also resolves the caller's tenant (``SharedTokenVerifier``). A request
+  without a valid token gets the SDK's ``401`` challenge naming the protected-resource
+  metadata, which names ``PF_OIDC_ISSUER`` and is served at
+  ``/.well-known/oauth-protected-resource/mcp`` and at the root form
   ``/.well-known/oauth-protected-resource``. When the identity provider or the database is
   unavailable the answer is ``503``, never ``401``. Nothing here reads which client is
   calling.
 - Transport security. Only the ``Host`` and ``Origin`` values ``PF_MCP_ALLOWED_HOSTS`` and
-  ``PF_MCP_ALLOWED_ORIGINS`` name are served; the check runs after sign-in.
+  ``PF_MCP_ALLOWED_ORIGINS`` name are served. ``_TransportSecurity`` checks them before
+  sign-in, so a refused request never reaches the token check or provisions a user or
+  tenant; the SDK's transport repeats the same check after sign-in.
 
 Process telemetry (``adapters.telemetry``) is configured at start-up, with the SDK
 transport's per-request INFO lines turned off. Each request is traced in one server span,
@@ -48,13 +52,14 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import AuthSettings
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from pydantic import AnyHttpUrl, BaseModel, ValidationError
 from sqlalchemy import Engine
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.opentelemetry import OpenTelemetryMiddleware
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -133,17 +138,24 @@ class IdentityUnavailableError(Exception):
 
 
 class SharedTokenVerifier:
-    """The SDK's ``TokenVerifier`` over ``oidc.authenticate``, the check REST uses too.
+    """The SDK's ``TokenVerifier`` over ``oidc.authenticate``, the check REST uses too,
+    accepting only tokens whose audience claim names one of ``audiences``.
 
     ``engine`` returns the runtime role's pool, in which a caller's first request
     provisions their user and tenant.
     """
 
     def __init__(
-        self, verifier: OidcVerifier, engine: Callable[[], Engine], *, clock_skew_seconds: int
+        self,
+        verifier: OidcVerifier,
+        engine: Callable[[], Engine],
+        *,
+        audiences: tuple[str, ...],
+        clock_skew_seconds: int,
     ) -> None:
         self._verifier = verifier
         self._engine = engine
+        self._audiences = audiences
         self._clock_skew_seconds = clock_skew_seconds
 
     async def verify_token(self, token: str) -> CallerAccessToken | None:
@@ -156,7 +168,11 @@ class SharedTokenVerifier:
         correlation_id = _request_correlation_id.get() or uuid.uuid4().hex
         try:
             context = await authenticate(
-                self._verifier, self._engine(), token, correlation_id=correlation_id
+                self._verifier,
+                self._engine(),
+                token,
+                audiences=self._audiences,
+                correlation_id=correlation_id,
             )
         except CodedError as error:
             if error.code == "unauthorized":
@@ -205,15 +221,17 @@ def create_app(
 
     server = _protocol_server(registry, runtime_engine)
     auth = auth_settings(settings, endpoint)
+    security = transport_security(endpoint)
     protocol_app = server.streamable_http_app(
         streamable_http_path=MCP_PATH,
         json_response=True,
         stateless_http=True,
-        transport_security=transport_security(endpoint),
+        transport_security=security,
         auth=auth,
         token_verifier=SharedTokenVerifier(
             verifier or verifier_for(settings),
             runtime_engine,
+            audiences=settings.mcp_audience,
             clock_skew_seconds=settings.oidc_clock_skew_seconds,
         ),
     )
@@ -247,6 +265,9 @@ def create_app(
         middleware=[
             Middleware(OpenTelemetryMiddleware),
             Middleware(_RequestScope),
+            # Before the SDK's authentication middleware, so the token is never checked for a
+            # request from a host or origin the server does not serve.
+            Middleware(_TransportSecurity, settings=security),
             *protocol_app.user_middleware,
         ],
         lifespan=lifespan,
@@ -261,8 +282,9 @@ def auth_settings(settings: Settings, endpoint: McpEndpoint) -> AuthSettings:
     resource at ``PF_MCP_PUBLIC_URL``, and the SDK does not compare a token's resource with
     that URL.
 
-    Keycloak's resource indicators are off, so tokens name the API audience rather than this
-    URL; ``oidc.py`` checks that audience instead (GHSA-w4fh-qvv9-3v23).
+    Keycloak's resource indicators are off, so tokens name the MCP audience
+    (``PF_MCP_AUDIENCE``) rather than this URL; ``oidc.py`` checks that audience instead
+    (GHSA-w4fh-qvv9-3v23).
     """
     return AuthSettings(
         issuer_url=AnyHttpUrl(settings.oidc_issuer),
@@ -384,3 +406,21 @@ class _RequestScope:
             await JSONResponse(body, status_code=503)(scope, receive, send)
         finally:
             _request_correlation_id.reset(token)
+
+
+class _TransportSecurity:
+    """Refuses an HTTP request whose ``Host`` or ``Origin`` header ``settings`` do not allow
+    (``421`` and ``403``, as the SDK answers) before any later middleware runs."""
+
+    def __init__(self, app: ASGIApp, settings: TransportSecuritySettings) -> None:
+        self.app = app
+        self._checks = TransportSecurityMiddleware(settings)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            # Only the headers are checked here; the SDK checks the content type itself.
+            refusal = await self._checks.validate_request(Request(scope), is_post=False)
+            if refusal is not None:
+                await refusal(scope, receive, send)
+                return
+        await self.app(scope, receive, send)

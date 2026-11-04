@@ -1,10 +1,13 @@
 """The ``property-focus`` Keycloak realm as committed in Git, running in local Compose.
 
 Covers sign-up with a verified email, the password policy and password reset, PKCE
-enforcement, the API audience, the absence of password, implicit and service-account
-clients, the realm file's lack of secrets, the dynamic client registration rules that MCP
-clients go through (including that Keycloak fetches no URI an anonymous registration names),
-and ``backend/scripts/keycloak_realm.py``, which keeps a running realm in step with the file.
+enforcement, the separate audiences (the web client's tokens are for the REST API,
+dynamically registered clients' tokens for the MCP server), the absence of password,
+implicit and service-account clients, the realm file's lack of secrets, the dynamic client
+registration rules that MCP clients go through (including that Keycloak fetches no URI an
+anonymous registration names, and that a registrant cannot obtain the REST API's scope),
+and ``backend/scripts/keycloak_realm.py``, which keeps a running realm in step with the
+file.
 """
 
 import json
@@ -40,6 +43,8 @@ REALM_SCRIPT = REPOSITORY_ROOT / "backend" / "scripts" / "keycloak_realm.py"
 REGISTRATION_POLICY = "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy"
 LOOPBACK_REDIRECT_URI = "http://127.0.0.1:43117/callback"
 HTTPS_REDIRECT_URI = "https://mcp-client.example.test/callback"
+API_AUDIENCE = "property-focus-api"
+MCP_AUDIENCE = "property-focus-mcp"
 
 # Keys whose values would be credentials if they held anything but an environment placeholder.
 SECRET_KEY = re.compile(r"secret|password|credential|private.?key", re.IGNORECASE)
@@ -185,10 +190,19 @@ def test_web_client_rejects_authorization_without_s256_pkce(
     assert redirect_error(Browser().get(url), redirect_uri) == "invalid_request"
 
 
-def test_access_token_carries_api_audience_and_bearer_type(keycloak: LocalKeycloak) -> None:
+def audiences(claims: dict[str, Any]) -> list[str]:
+    """The ``aud`` claim as a list."""
+    audience = claims.get("aud", [])
+    return [audience] if isinstance(audience, str) else list(audience)
+
+
+def test_web_access_token_carries_only_the_api_audience_and_bearer_type(
+    keycloak: LocalKeycloak,
+) -> None:
     claims = keycloak.pkce_sign_in(keycloak.create_user()).access_claims
 
-    assert "property-focus-api" in claims["aud"]
+    assert API_AUDIENCE in audiences(claims)
+    assert MCP_AUDIENCE not in audiences(claims)
     assert claims["typ"] == "Bearer"
     assert claims["iss"] == ISSUER
 
@@ -527,7 +541,69 @@ def test_registered_client_requires_pkce_and_asks_for_consent(keycloak: LocalKey
         redirect_uri=LOOPBACK_REDIRECT_URI,
         pkce=pkce,
     )
-    assert "property-focus-api" in tokens.access_claims["aud"]
+    assert MCP_AUDIENCE in audiences(tokens.access_claims)
+    assert API_AUDIENCE not in audiences(tokens.access_claims)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "metadata"),
+    [
+        pytest.param(
+            "openid-connect",
+            public_client_metadata(scope=f"openid {API_AUDIENCE}"),
+            id="oidc-scope",
+        ),
+        pytest.param(
+            "default",
+            {
+                "clientId": f"api-scope-{uuid.uuid4().hex[:8]}",
+                "publicClient": True,
+                "redirectUris": [LOOPBACK_REDIRECT_URI],
+                "defaultClientScopes": [API_AUDIENCE],
+            },
+            id="keycloak-default-scopes",
+        ),
+        pytest.param(
+            "default",
+            {
+                "clientId": f"api-scope-{uuid.uuid4().hex[:8]}",
+                "publicClient": True,
+                "redirectUris": [LOOPBACK_REDIRECT_URI],
+                "optionalClientScopes": [API_AUDIENCE],
+            },
+            id="keycloak-optional-scopes",
+        ),
+    ],
+)
+def test_anonymous_registration_asking_for_the_api_scope_is_refused(
+    keycloak: LocalKeycloak, endpoint: str, metadata: dict[str, Any]
+) -> None:
+    before = client_ids(keycloak)
+
+    response = Browser().request(
+        "POST", f"{ISSUER}/clients-registrations/{endpoint}", json_body=metadata
+    )
+
+    assert response.status == 403, response.body
+    assert response.json()["error"] == "insufficient_scope"
+    assert client_ids(keycloak) == before
+
+
+def test_registered_client_asking_for_the_api_scope_at_sign_in_is_refused(
+    keycloak: LocalKeycloak,
+) -> None:
+    registration = keycloak.register_client(public_client_metadata())
+    assert registration.status == 201, registration.metadata
+    pkce = Pkce.new()
+    url = keycloak.realm.authorization_url(
+        registration.metadata["client_id"],
+        LOOPBACK_REDIRECT_URI,
+        scope=f"openid {API_AUDIENCE}",
+        code_challenge=pkce.challenge,
+        code_challenge_method="S256",
+    )
+
+    assert redirect_error(Browser().get(url), LOOPBACK_REDIRECT_URI) == "invalid_scope"
 
 
 def realm_script_environment() -> dict[str, str]:
@@ -621,3 +697,33 @@ def test_realm_apply_keeps_users_and_registered_clients(keycloak: LocalKeycloak)
     assert "realm settings: displayName" in applied.stdout
     assert keycloak.admin.get(f"/users/{user.id}")["email"] == user.email
     assert len(keycloak.admin.get(f"/clients?clientId={client_id}")) == 1
+
+
+@pytest.mark.usefixtures("realm_restored")
+def test_realm_apply_moves_a_client_registered_with_the_api_scope_to_the_mcp_scope(
+    keycloak: LocalKeycloak,
+) -> None:
+    # A client registered while the API scope was a realm default holds it, not the MCP one.
+    registration = keycloak.register_client(public_client_metadata())
+    assert registration.status == 201, registration.metadata
+    client_id = registration.metadata["client_id"]
+    (client,) = keycloak.admin.get(f"/clients?clientId={client_id}")
+    scopes = {scope["name"]: scope["id"] for scope in keycloak.admin.get("/client-scopes")}
+    default_scopes = f"/clients/{client['id']}/default-client-scopes"
+    keycloak.admin.request("DELETE", f"{default_scopes}/{scopes[MCP_AUDIENCE]}")
+    keycloak.admin.request("PUT", f"{default_scopes}/{scopes[API_AUDIENCE]}")
+
+    check = realm_script("check")
+    applied = realm_script("apply")
+
+    assert check.returncode == 1
+    assert f"client {client_id}: remove default scope {API_AUDIENCE}" in check.stdout
+    assert f"client {client_id}: add default scope {MCP_AUDIENCE}" in check.stdout
+    assert applied.returncode == 0, applied.stderr
+    assert realm_script("check").returncode == 0
+    (client,) = keycloak.admin.get(f"/clients?clientId={client_id}")
+    assert API_AUDIENCE not in client["defaultClientScopes"]
+    assert MCP_AUDIENCE in client["defaultClientScopes"]
+    (web,) = keycloak.admin.get(f"/clients?clientId={WEB_CLIENT_ID}")
+    assert API_AUDIENCE in web["defaultClientScopes"]
+    assert MCP_AUDIENCE not in web["defaultClientScopes"]

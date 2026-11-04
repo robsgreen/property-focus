@@ -36,7 +36,9 @@ listing, property or search feature exists yet.
 
 Browser and MCP clients send a bearer token to the REST API (`/v1`, port 8000) or the MCP
 adapter (`POST /mcp`, port 8001). Both call `oidc.authenticate()`, which verifies the token
-and maps issuer and subject to a user and the tenant they own (created on first request).
+for that surface's own audience (`property-focus-api` for the web app's tokens,
+`property-focus-mcp` for MCP clients') and maps issuer and subject to a user and the tenant
+they own (created on first request).
 Use cases run in a `UnitOfWork` scoped to that tenant; RLS enforces it. Background work is
 a workflow run, admitted with the change that caused it and carried onward by a
 transactional outbox; short-lived `run-task` processes take a fenced lease, run the handler

@@ -8,9 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
-from support.keycloak import REPOSITORY_ROOT, LocalKeycloak, TestUser, Tokens
+from support.keycloak import REPOSITORY_ROOT, Tokens
 
 from contract.mcp_client import McpClient
 
@@ -40,12 +39,6 @@ CLIENT_SPECIFIC = re.compile(
     r"|mcp-inspector|cursor ide|cursor\.(com|sh))\b",
     re.IGNORECASE,
 )
-
-
-@pytest.fixture
-def web_tokens(keycloak: LocalKeycloak, user: TestUser) -> Tokens:
-    """``user``'s tokens from the web client."""
-    return keycloak.pkce_sign_in(user)
 
 
 def scanned_files() -> list[Path]:
@@ -99,9 +92,9 @@ def test_challenge_and_metadata_ignore_the_user_agent(
 
 
 def test_mcp_answers_ignore_the_user_agent_and_client_info(
-    mcp_client: McpClient, web_tokens: Tokens
+    mcp_client: McpClient, mcp_tokens: Tokens
 ) -> None:
-    token = web_tokens.access_token
+    token = mcp_tokens.access_token
 
     def answers(user_agent: str, client_name: str) -> tuple[Any, ...]:
         initialized = mcp_client.post(

@@ -50,15 +50,18 @@ async def execution_context(
     """Authenticate the request and return its execution context.
 
     Provisions the caller's user and tenant on their first request. Raises ``CodedError``
-    ``unauthorized`` without a valid bearer access token.
+    ``unauthorized`` without a valid bearer access token for the API's audience
+    (``PF_OIDC_AUDIENCE``).
     """
     if credentials is None:  # no Authorization header, or not the Bearer scheme
         raise CodedError("unauthorized", "Sign in to continue.")
     verifier: OidcVerifier = request.app.state.verifier
+    audiences: tuple[str, ...] = request.app.state.audiences
     return await authenticate(
         verifier,
         _engine(request),
         credentials.credentials,
+        audiences=audiences,
         correlation_id=_correlation_id(request),
     )
 

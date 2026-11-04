@@ -13,7 +13,7 @@ from support.keycloak import ISSUER, LocalKeycloak, Tokens
 
 from property_focus.adapters.auth.oidc import OidcVerifier
 from property_focus.adapters.db.models import Tenant, User, WorkflowRun, WorkflowStep
-from property_focus.adapters.db.repositories import TenantScope, UnitOfWork
+from property_focus.adapters.db.repositories import ServiceScope, TenantScope, UnitOfWork
 from property_focus.adapters.rest import schemas
 from property_focus.adapters.rest.app import create_app
 from property_focus.application.workflows import admit_run, utc_now
@@ -48,8 +48,8 @@ def signed_in(tokens: Tokens) -> dict[str, str]:
 
 def tenant_of(engine: Engine, tokens: Tokens) -> TenantScope:
     """The tenant provisioned for the subject of ``tokens``."""
-    with engine.connect() as connection:
-        user_id, tenant_id = connection.execute(
+    with UnitOfWork(engine, ServiceScope()) as uow:
+        user_id, tenant_id = uow.session.execute(
             select(User.id, Tenant.id)
             .join(Tenant, Tenant.owner_user_id == User.id)
             .where(User.issuer == ISSUER, User.subject == tokens.access_claims["sub"])
@@ -102,6 +102,27 @@ def test_keycloak_access_token_is_accepted_by_the_workflow_run_route(
         ("load", "QUEUED", 0)
     ]
     assert "tenant_id" not in response.json()
+
+
+def test_mcp_client_token_is_a_401_problem_without_provisioning(
+    api: TestClient, keycloak: LocalKeycloak, runtime_engine: Engine
+) -> None:
+    tokens = keycloak.mcp_sign_in(keycloak.create_user())
+    assert "property-focus-mcp" in tokens.access_claims["aud"]
+
+    response = api.get(
+        f"/v1/workflow-runs/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {tokens.access_token}"},
+    )
+
+    assert_problem(response, 401, "unauthorized")
+    with UnitOfWork(runtime_engine, ServiceScope()) as uow:
+        users = uow.session.execute(
+            select(User.id).where(
+                User.issuer == ISSUER, User.subject == tokens.access_claims["sub"]
+            )
+        ).all()
+    assert users == []
 
 
 def test_malformed_id_is_a_400_problem(api: TestClient, signed_in: dict[str, str]) -> None:

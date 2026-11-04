@@ -435,6 +435,30 @@
           }
         }
       ]
+    },
+    {
+      "name": "property-focus-mcp",
+      "description": "Adds the Property Focus MCP server audience to access tokens",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "property-focus-mcp audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "property-focus-mcp",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "id.token.claim": "false",
+            "lightweight.claim": "false"
+          }
+        }
+      ]
     }
   ],
   "defaultDefaultClientScopes": [
@@ -444,7 +468,7 @@
     "roles",
     "web-origins",
     "acr",
-    "property-focus-api"
+    "property-focus-mcp"
   ],
   "clients": [
     {
@@ -458,6 +482,15 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "roles",
+        "web-origins",
+        "acr",
+        "property-focus-api"
+      ],
       "redirectUris": [
         "${PF_WEB_ORIGIN}/auth/callback"
       ],

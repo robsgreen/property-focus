@@ -2,10 +2,11 @@
 
 ``OidcVerifier`` checks a bearer token against the configured issuer (``PF_OIDC_*``
 settings): its signature against the issuer's published key set (JWKS), then ``iss``, the
-configured audience claim, ``exp`` and ``nbf`` within the clock skew, the configured
-token-type claim, and the signing algorithm against the allowlist. It contacts the
-identity provider only for its discovery document and its JWKS, so any standard provider
-works by configuration alone.
+configured audience claim against the audiences the calling surface accepts (REST
+``PF_OIDC_AUDIENCE``, MCP ``PF_MCP_AUDIENCE``), ``exp`` and ``nbf`` within the clock skew,
+the configured token-type claim, and the signing algorithm against the allowlist. It
+contacts the identity provider only for its discovery document and its JWKS, so any
+standard provider works by configuration alone.
 
 PyJWT's ``PyJWKClient`` fetches the key set, one client per issuer. A token naming an
 unknown ``kid`` triggers a refetch, and fetch attempts, successful or failed, start at most
@@ -20,21 +21,21 @@ attempt is allowed they fail at once without contacting the issuer.
 supplies. Only unit tests use it, and only with ``PF_AUTH_FIXTURE_ISSUER`` set, which
 configuration refuses outside development.
 
-``authenticate`` is the one token check both adapters bind to: it verifies the token, then
-resolves the caller's tenant.
+``authenticate`` is the one token check both adapters bind to: it verifies the token for the
+adapter's own audiences, then resolves the caller's tenant.
 """
 
 import asyncio
 import json
 import time
 import urllib.request
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import jwt
-from jwt import PyJWK, PyJWKClient
+from jwt import PyJWK, PyJWKClient, PyJWKSet
 from jwt.exceptions import (
-    PyJWKClientConnectionError,
     PyJWKClientError,
     PyJWKSetError,
     PyJWTError,
@@ -70,16 +71,28 @@ class InvalidTokenError(Exception):
     """
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Hands a redirect back as an error instead of following it, so a document is read only
+    from the URL asked for, never from another scheme or host."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+# Fetches identity-provider documents without following redirects.
+_OPENER = urllib.request.build_opener(_RefuseRedirects())
+
+
 async def fetch_json(url: str) -> Mapping[str, Any]:
     """GET ``url`` and parse its JSON body, without blocking the event loop.
 
-    Raises ``CodedError`` ``dependency_transient`` when the request fails or the body is not
-    a JSON object.
+    A redirect is not followed. Raises ``CodedError`` ``dependency_transient`` when the
+    request fails or is redirected, or the body is not a JSON object.
     """
 
     def get() -> Any:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+        with _OPENER.open(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
             return json.load(response)
 
     try:
@@ -165,9 +178,13 @@ class _IssuerKeys:
     async def _fetch(self) -> None:
         """Fetch the key set and make it current, recording the attempt and its outcome.
 
-        Encryption keys are not signing keys, and a set the client cannot parse holds none.
-        Raises ``CodedError`` ``dependency_transient`` when discovery or the fetch fails; the
-        current set is then kept.
+        Raises ``CodedError`` ``dependency_transient`` when discovery or the fetch fails, or
+        when the response is not a key set holding at least one signing key: not a JSON
+        object, no usable key, or only encryption keys. A well-formed but empty set
+        (``{"keys": []}``) is such a failure too, not an instruction to trust nothing: an
+        issuer retires a key by publishing a set without it, and a set with no signing key
+        at all is far likelier a fault. On any failure the current set is kept, until it
+        expires.
         """
         self._attempted_at = self._clock()
         self._failure = None
@@ -175,25 +192,37 @@ class _IssuerKeys:
         try:
             client = await self._client()
             key_set = await asyncio.to_thread(client.get_jwk_set, True)
+            signing_keys = _signing_keys(key_set)
         except CodedError as error:
             self._failure = error
             raise
-        except (PyJWKClientConnectionError, OSError, ValueError) as error:
-            # ValueError: the response was not JSON. OSError: the connection broke mid-read.
+        except (PyJWKClientError, PyJWKSetError, OSError, ValueError) as error:
+            # PyJWKClientError: a failed request (PyJWKClientConnectionError), a body that is
+            # not a JSON object, or a client that cannot be built for the URL. PyJWKSetError:
+            # no usable key. ValueError: the body is not JSON. OSError: the connection broke
+            # mid-read.
             self._failure = CodedError(
                 "dependency_transient", "The identity provider's key set could not be fetched."
             )
             raise self._failure from error
-        except (PyJWKClientError, PyJWKSetError):
-            key_set = None
         finally:
             self._fetching = False
         self._loaded_at = self._attempted_at
-        signing_keys: dict[str, PyJWK] = {}
-        for key in key_set.keys if key_set is not None else []:
-            if key.key_id is not None and key.public_key_use != "enc":
-                signing_keys.setdefault(key.key_id, key)
         self._signing_keys = signing_keys
+
+
+def _signing_keys(key_set: PyJWKSet) -> dict[str, PyJWK]:
+    """The signing keys of ``key_set`` by ``kid``; encryption keys are not signing keys.
+
+    Raises ``PyJWKSetError`` when it holds none.
+    """
+    signing_keys: dict[str, PyJWK] = {}
+    for key in key_set.keys:
+        if key.key_id is not None and key.public_key_use != "enc":
+            signing_keys.setdefault(key.key_id, key)
+    if not signing_keys:
+        raise PyJWKSetError("The key set holds no signing key")
+    return signing_keys
 
 
 class OidcVerifier:
@@ -213,17 +242,17 @@ class OidcVerifier:
         the key-set refetch limits; token times are checked against the wall clock.
         """
         self.issuer = issuer
-        self._audiences = frozenset(settings.oidc_audience)
         self._audience_claim = settings.oidc_audience_claim
         self._token_type_claim, self._token_type = settings.oidc_token_type
         self._algorithms = list(settings.oidc_algorithms)
         self._skew_seconds = settings.oidc_clock_skew_seconds
         self._keys = _IssuerKeys(jwks_client, clock)
 
-    async def verify(self, token: str) -> VerifiedIdentity:
-        """Return the identity ``token`` proves.
+    async def verify(self, token: str, *, audiences: Collection[str]) -> VerifiedIdentity:
+        """Return the identity ``token`` proves to a resource that accepts ``audiences``.
 
-        Raises ``InvalidTokenError`` for a token that fails any check, and ``CodedError``
+        The audience claim must hold at least one of ``audiences``. Raises
+        ``InvalidTokenError`` for a token that fails any check, and ``CodedError``
         ``dependency_transient`` when the issuer's keys cannot be fetched.
         """
         try:
@@ -252,7 +281,7 @@ class OidcVerifier:
         except PyJWTError as error:
             raise InvalidTokenError(f"token rejected: {error}") from error
 
-        self._check_audience(claims.get(self._audience_claim))
+        self._check_audience(claims.get(self._audience_claim), audiences)
         if claims.get(self._token_type_claim) != self._token_type:
             raise InvalidTokenError(f"not an access token: {self._token_type_claim} mismatch")
         subject = claims["sub"]
@@ -266,10 +295,10 @@ class OidcVerifier:
             email_verified=claims.get("email_verified") is True,
         )
 
-    def _check_audience(self, value: Any) -> None:
+    def _check_audience(self, value: Any, accepted: Collection[str]) -> None:
         audiences = [value] if isinstance(value, str) else value
-        if not isinstance(audiences, list) or self._audiences.isdisjoint(
-            item for item in audiences if isinstance(item, str)
+        if not isinstance(audiences, list) or not any(
+            isinstance(item, str) and item in accepted for item in audiences
         ):
             raise InvalidTokenError(f"the {self._audience_claim} claim names no accepted audience")
 
@@ -285,8 +314,10 @@ def verifier_for(
 
     Keys come from ``PF_OIDC_JWKS_URL`` when set, otherwise from the ``jwks_uri`` of the
     issuer's discovery document, which ``fetch`` reads on first use and which must name the
-    same issuer. One ``jwks_client_type`` client, created once that URL is known, fetches and
-    caches the key set for every request. Nothing else is ever requested from the provider.
+    same issuer; outside development that ``jwks_uri`` must also be https on the issuer's
+    host and port. One ``jwks_client_type`` client, created once that URL is known, fetches
+    and caches the key set for every request; neither request follows a redirect. Nothing
+    else is ever requested from the provider.
     """
     issuer = settings.oidc_issuer
     client: PyJWKClient | None = None
@@ -294,18 +325,22 @@ def verifier_for(
     async def issuer_client() -> PyJWKClient:
         nonlocal client
         if client is None:
-            jwks_url = settings.oidc_jwks_url or await _discovered_jwks_url(fetch, issuer)
+            jwks_url = settings.oidc_jwks_url or await _discovered_jwks_url(
+                fetch, issuer, on_issuer_host=not settings.development
+            )
             client = _jwks_client(jwks_client_type, jwks_url)
         return client
 
     return OidcVerifier(settings, issuer=issuer, jwks_client=issuer_client, clock=clock)
 
 
-async def _discovered_jwks_url(fetch: FetchJson, issuer: str) -> str:
+async def _discovered_jwks_url(fetch: FetchJson, issuer: str, *, on_issuer_host: bool) -> str:
     """The ``jwks_uri`` of ``issuer``'s discovery document.
 
-    Raises ``CodedError`` ``dependency_transient`` when the document cannot be read or does
-    not name exactly ``issuer`` and a key-set URL.
+    With ``on_issuer_host``, the URI must be https on the issuer's own host and port, so a
+    discovery document cannot send key-set requests anywhere else. Raises ``CodedError``
+    ``dependency_transient`` when the document cannot be read, does not name exactly
+    ``issuer`` and a key-set URL, or names a URL that breaks that rule.
     """
     discovery = await fetch(f"{issuer.rstrip('/')}/.well-known/openid-configuration")
     jwks_url = discovery.get("jwks_uri")
@@ -314,7 +349,26 @@ async def _discovered_jwks_url(fetch: FetchJson, issuer: str) -> str:
             "dependency_transient",
             "The identity provider's discovery document does not match its issuer.",
         )
+    if on_issuer_host and not _is_https_on_host_of(jwks_url, issuer):
+        raise CodedError(
+            "dependency_transient",
+            "The identity provider's key set is not served over https from its own host.",
+        )
     return jwks_url
+
+
+def _is_https_on_host_of(url: str, issuer: str) -> bool:
+    """Whether ``url`` is https on the same host and port as ``issuer``."""
+    try:
+        target, origin = urlsplit(url), urlsplit(issuer)
+        return (
+            target.scheme == "https"
+            and target.hostname is not None
+            and target.hostname == origin.hostname
+            and (target.port or 443) == (origin.port or 443)
+        )
+    except ValueError:  # an invalid port
+        return False
 
 
 def _jwks_client(client_type: type[PyJWKClient], jwks_url: str) -> PyJWKClient:
@@ -360,9 +414,15 @@ def fixture_verifier(
 
 
 async def authenticate(
-    verifier: OidcVerifier, engine: Engine, token: str, *, correlation_id: str
+    verifier: OidcVerifier,
+    engine: Engine,
+    token: str,
+    *,
+    audiences: Collection[str],
+    correlation_id: str,
 ) -> ExecutionContext:
-    """Verify the bearer access ``token`` and return the caller's execution context.
+    """Verify the bearer access ``token`` for a surface accepting ``audiences`` and return
+    the caller's execution context.
 
     Provisions the caller's user and tenant on their first request (``resolve_context``).
     Raises ``CodedError`` ``unauthorized`` when the token fails any check, and
@@ -370,7 +430,7 @@ async def authenticate(
     be reached.
     """
     try:
-        identity = await verifier.verify(token)
+        identity = await verifier.verify(token, audiences=audiences)
     except InvalidTokenError as error:
         raise CodedError("unauthorized", "The access token is invalid or expired.") from error
     try:

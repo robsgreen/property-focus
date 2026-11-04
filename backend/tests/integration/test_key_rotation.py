@@ -52,10 +52,12 @@ class RecordingVerifier:
         self._verifier: OidcVerifier = verifier_for(
             settings, jwks_client_type=CountingClient, clock=self.clock
         )
+        # The web client's tokens, which these tests sign in for, carry the REST audience.
+        self._audiences = settings.oidc_audience
 
     def accepts(self, token: str) -> bool:
         try:
-            asyncio.run(self._verifier.verify(token))
+            asyncio.run(self._verifier.verify(token, audiences=self._audiences))
         except InvalidTokenError:
             return False
         return True

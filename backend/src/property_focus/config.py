@@ -43,6 +43,7 @@ _ENVIRONMENT_VARIABLES: dict[str, str] = {
     "PF_OIDC_ALGORITHMS": "oidc_algorithms",
     "PF_OIDC_CLOCK_SKEW_SECONDS": "oidc_clock_skew_seconds",
     "PF_OTLP_ENDPOINT": "otlp_endpoint",
+    "PF_MCP_AUDIENCE": "mcp_audience",
     "PF_MCP_PUBLIC_URL": "mcp_public_url",
     "PF_MCP_ALLOWED_HOSTS": "mcp_allowed_hosts",
     "PF_MCP_ALLOWED_ORIGINS": "mcp_allowed_origins",
@@ -114,9 +115,14 @@ class Settings(BaseModel):
     # Key-set URL that replaces the discovery document's `jwks_uri`, for a backchannel host
     # (Compose service name); None reads it from discovery. Must be https outside development.
     oidc_jwks_url: str | None = None
-    # Accepted audience values; a token passes when its audience claim holds any of them.
-    # PF_OIDC_AUDIENCE is comma-separated.
+    # Audience values the REST API accepts; a token passes when its audience claim holds any
+    # of them. PF_OIDC_AUDIENCE is comma-separated. The realm gives this audience to the web
+    # client only.
     oidc_audience: tuple[str, ...] = Field(default=("property-focus-api",), min_length=1)
+    # Audience values the MCP server accepts, in the same claim; none may also be a REST
+    # audience, so a token is good for one surface only. PF_MCP_AUDIENCE is comma-separated.
+    # The realm gives this audience to dynamically registered clients by default.
+    mcp_audience: tuple[str, ...] = Field(default=("property-focus-mcp",), min_length=1)
     # The claim holding the audience: `aud` for Keycloak, `client_id` for Cognito.
     oidc_audience_claim: str = Field(default="aud", min_length=1)
     # (claim, value) that marks an access token; PF_OIDC_TOKEN_TYPE is `claim=value`, such as
@@ -147,6 +153,7 @@ class Settings(BaseModel):
 
     @field_validator(
         "oidc_audience",
+        "mcp_audience",
         "oidc_algorithms",
         "mcp_allowed_hosts",
         "mcp_allowed_origins",
@@ -207,6 +214,16 @@ class Settings(BaseModel):
             raise ValueError(
                 "PF_AUTH_FIXTURE_ISSUER is development-only and is refused when "
                 f"PF_ENVIRONMENT={self.environment}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refuse_shared_audiences(self) -> Self:
+        shared = sorted(set(self.oidc_audience) & set(self.mcp_audience))
+        if shared:
+            raise ValueError(
+                "PF_OIDC_AUDIENCE and PF_MCP_AUDIENCE must not share a value, so a token is "
+                f"accepted by REST or MCP but never both; shared: {', '.join(shared)}"
             )
         return self
 

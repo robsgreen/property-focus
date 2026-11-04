@@ -4,12 +4,16 @@ Keycloak imports the realm file only when the realm does not exist yet. For ever
 change, ``deploy.sh`` runs this script against the server's loopback port:
 
 - ``apply`` updates the realm to match the file: realm settings, default client scopes,
-  client scopes and their protocol mappers, the file's clients, client registration
-  policies, client profiles and client policies. It creates what is missing and changes
-  what differs. It never deletes users or clients; dynamically registered MCP clients, and
-  every user, are left as they are. Registration policies and scope mappers missing from
-  the file are removed, because the file lists them completely. A second ``apply`` with an
-  unchanged file changes nothing.
+  client scopes and their protocol mappers, the file's clients (with exactly the default
+  client scopes a file client lists), client registration policies, client profiles and
+  client policies. It creates what is missing and changes what differs. It never deletes
+  users or clients; dynamically registered MCP clients, and every user, are left as they
+  are, except that a client scope the file grants only by listing it on a client (one that
+  is not a realm default, such as the REST API audience scope) is removed from every other
+  client, which also gets any realm default client scope it lacks (so an MCP client
+  registered while the API scope was a realm default gets the MCP scope instead).
+  Registration policies and scope mappers missing from the file are removed, because the
+  file lists them completely. A second ``apply`` with an unchanged file changes nothing.
 - ``check`` reports each difference between the running realm and the file and exits 1
   when there is any, else 0.
 - ``ensure-user --email EMAIL`` makes sure a user with that verified email exists, enabled,
@@ -69,6 +73,8 @@ _SECTIONS = frozenset(
         "clientPolicies",
     }
 )
+# How many clients one admin API page lists.
+_CLIENT_PAGE_SIZE = 100
 # How Keycloak returns a stored secret it will not reveal.
 _MASKED_SECRET = "**********"
 _PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::([^}]*))?\}")
@@ -334,19 +340,87 @@ class RealmReconciler:
             )
 
     def _clients(self) -> Iterator[Change]:
+        """Changes to the file's clients, then removals of restricted client scopes.
+
+        A file client's ``defaultClientScopes`` are reconciled through their own endpoints,
+        because a client update ignores them. A restricted scope is one of the file's client
+        scopes that is not a realm default: only a file client that lists it may hold it, and
+        any other client holding one is given the realm default scopes in its place.
+        """
+        listed_scopes: dict[str, set[str]] = {}
         for client in self._desired.get("clients", []):
             client_id = client["clientId"]
             if client_id in UNMANAGED_CLIENTS:
                 continue
+            settings = {key: value for key, value in client.items() if key != "defaultClientScopes"}
+            if "defaultClientScopes" in client:
+                listed_scopes[client_id] = set(client["defaultClientScopes"])
             query = urllib.parse.urlencode({"clientId": client_id})
             matches = self._get(f"/clients?{query}")
             if not matches:
+                # A created client takes the default scopes it names.
                 yield Change(f"client {client_id}: create", self._call("POST", "/clients", client))
-            elif found := differences(client, matches[0]):
+                continue
+            current = matches[0]
+            if found := differences(settings, current):
                 yield Change(
                     f"client {client_id}: {', '.join(found)}",
-                    self._call("PUT", f"/clients/{matches[0]['id']}", merged(matches[0], client)),
+                    self._call("PUT", f"/clients/{current['id']}", merged(current, settings)),
                 )
+            if client_id in listed_scopes:
+                yield from self._client_default_scopes(current, listed_scopes[client_id])
+
+        realm_defaults = set(self._desired.get("defaultDefaultClientScopes", []))
+        restricted = {
+            scope["name"] for scope in self._desired.get("clientScopes", [])
+        } - realm_defaults
+        for current in self._all_clients():
+            client_id = current["clientId"]
+            if client_id in listed_scopes or client_id in UNMANAGED_CLIENTS:
+                continue
+            held = set(current.get("defaultClientScopes", []))
+            if held & restricted:
+                # Registered before the scope was restricted, when it was a realm default:
+                # the client moves to today's realm defaults, as a new registration gets.
+                yield from self._client_default_scopes(
+                    current, (held - restricted) | realm_defaults
+                )
+
+    def _client_default_scopes(
+        self, client: Mapping[str, Any], desired: set[str]
+    ) -> Iterator[Change]:
+        """Changes that give ``client`` exactly the default client scopes ``desired``."""
+        actual = set(client.get("defaultClientScopes", []))
+        path = f"/clients/{client['id']}/default-client-scopes"
+
+        def scope_call(method: str, name: str) -> Callable[[], None]:
+            # Looked up when applied, so a scope created earlier in the same run is found.
+            def call() -> None:
+                scopes = {scope["name"]: scope["id"] for scope in self._get("/client-scopes")}
+                self._call(method, f"{path}/{scopes[name]}")()
+
+            return call
+
+        for name in sorted(desired - actual):
+            yield Change(
+                f"client {client['clientId']}: add default scope {name}", scope_call("PUT", name)
+            )
+        for name in sorted(actual - desired):
+            yield Change(
+                f"client {client['clientId']}: remove default scope {name}",
+                scope_call("DELETE", name),
+            )
+
+    def _all_clients(self) -> Iterator[dict[str, Any]]:
+        """Every client of the realm, built-in and dynamically registered ones included."""
+        first = 0
+        while True:
+            query = urllib.parse.urlencode({"first": first, "max": _CLIENT_PAGE_SIZE})
+            page = self._get(f"/clients?{query}")
+            yield from page
+            if len(page) < _CLIENT_PAGE_SIZE:
+                return
+            first += _CLIENT_PAGE_SIZE
 
     def _registration_policies(self) -> Iterator[Change]:
         desired_policies = self._desired.get("components", {}).get(REGISTRATION_POLICY)

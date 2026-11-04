@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
-from support.keycloak import LocalKeycloak, TestUser
+from support.keycloak import LocalKeycloak, TestUser, Tokens
 
 from contract.mcp_client import McpClient
 from property_focus.adapters.auth.oidc import OidcVerifier
@@ -30,6 +30,19 @@ def mcp(settings: Settings, runtime_engine: Engine, verifier: OidcVerifier) -> I
 def user(keycloak: LocalKeycloak) -> TestUser:
     """A new synthetic realm user with a verified email."""
     return keycloak.create_user()
+
+
+@pytest.fixture
+def web_tokens(keycloak: LocalKeycloak, user: TestUser) -> Tokens:
+    """``user``'s tokens from the web client: the REST API's audience."""
+    return keycloak.pkce_sign_in(user)
+
+
+@pytest.fixture
+def mcp_tokens(keycloak: LocalKeycloak, user: TestUser) -> Tokens:
+    """``user``'s tokens from a dynamically registered client: the MCP server's audience, for
+    tests about the transport rather than sign-in."""
+    return keycloak.mcp_sign_in(user)
 
 
 @pytest.fixture
