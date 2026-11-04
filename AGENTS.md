@@ -93,7 +93,8 @@ make dev              # API :8000, MCP :8001, web :5173, scheduler (development 
 make be-check be-unit # lint, format, types, boundaries, credential scan, unit tests
 make be-int           # integration and contract tests (Docker and .env)
 make fe               # web app lint, types, tests, build
-make verify           # everything CI can run
+make verify           # path-aware CI checks; not the security scans
+make scan             # Semgrep, Bandit and dependency audits (warn-only in CI)
 ```
 
 ## Directory Map
