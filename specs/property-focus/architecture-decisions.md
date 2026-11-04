@@ -1437,6 +1437,8 @@ The user has no AWS account yet, so dogfood cannot depend on Cognito. D28 alread
 
 ## A5. Edge protection: Cloudflare for dogfood, AWS WAF and throttling on AWS, per-account limits from phase 5 (refines D27, D48, D49)
 
+**Amended 2026-11-04 (user):** the dogfood origin also requires Cloudflare's client certificate (global Authenticated Origin Pulls; owner review of PR #2, item 5). The user chose global over zone-level pulls: global proves a connection comes through Cloudflare, not through this zone, so another Cloudflare zone pointed at the origin's address could bypass this zone's WAF and rate-limiting rule. The risk is accepted for dogfood because the origin's address is not published, every request still needs a valid account's token, phase 5 adds per-account rate limits, and AWS replaces this edge in phase 9.
+
 **Decision**
 
 Protect every public entry point at the edge and limit each account's request rate inside the application:
