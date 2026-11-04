@@ -16,11 +16,13 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, select
+from sqlalchemy import URL, Engine, create_engine, select, text
+from sqlalchemy.pool import NullPool
 
 from property_focus import cli
 from property_focus.adapters.db.models import (
     AuditEvent,
+    IdempotencyRecord,
     OutboxEvent,
     StepAttempt,
     WorkflowRun,
@@ -31,14 +33,19 @@ from property_focus.adapters.secrets import DeploymentInjectedSecretProvider
 from property_focus.application.ports import TaskInput
 from property_focus.application.workflows import (
     DEFAULT_RUN_DEADLINE,
+    IDEMPOTENCY_TTL,
     Admission,
+    Declined,
     InvalidTransitionError,
     Lease,
     NewEvent,
+    OutboxPublisher,
     acquire_lease,
     admit_run,
     cancel_run,
     downstream_run_id,
+    prune_idempotency_records,
+    record_event,
     task_input_for,
     utc_now,
 )
@@ -65,16 +72,15 @@ LEASE = timedelta(minutes=15)
 
 async def record_subject(context: TaskContext) -> TaskResult:
     """The test task's domain result: one audit row in the run's tenant."""
-    row = context.uow.repository(AuditEvent).add(
-        AuditEvent(
-            id=uuid.uuid4(),
-            principal_service=context.task.task_kind,
-            action=RECORDED,
-            target_type=context.task.subject_type,
-            target_id=context.task.subject_id,
-            metadata_={"input_digest": context.task.input_digest},
-        )
+    row = AuditEvent(
+        id=uuid.uuid4(),
+        principal_service=context.task.task_kind,
+        action=RECORDED,
+        target_type=context.task.subject_type,
+        target_id=context.task.subject_id,
+        metadata_={"input_digest": context.task.input_digest},
     )
+    context.write(lambda uow: uow.repository(AuditEvent).add(row))
     return TaskResult(result_refs=[str(row.id)])
 
 
@@ -173,6 +179,7 @@ def admit(
     *,
     key: str | None = None,
     subject: uuid.UUID = SUBJECT,
+    now: datetime | None = None,
 ) -> uuid.UUID:
     with UnitOfWork(engine, tenant) as uow:
         admission = admit_run(
@@ -182,7 +189,7 @@ def admit(
             kind=kind,
             subject_type="property",
             subject_id=subject,
-            now=utc_now(),
+            now=now or utc_now(),
         )
     return admission.workflow_run_id
 
@@ -703,6 +710,160 @@ def test_concurrent_admissions_with_one_key_admit_one_run(
             select(WorkflowRun.id).where(WorkflowRun.tenant_id == tenant.tenant_id)
         ).all()
     assert runs == [first.workflow_run_id]
+
+
+def record_downstream_event(engine: Engine, tenant: TenantScope) -> uuid.UUID:
+    """Commit an event that launches ``record-subject`` in ``tenant``; return its outbox ID."""
+    event = NewEvent(
+        event_type="subject.changed",
+        aggregate_type="property",
+        aggregate_id=uuid.uuid4(),
+        aggregate_revision=1,
+        destinations=("record-subject",),
+    )
+    with UnitOfWork(engine, tenant) as uow:
+        (outbox_event_id,) = record_event(
+            uow.session, event, tenant_id=tenant.tenant_id, now=utc_now()
+        )
+    return outbox_event_id
+
+
+def load_outbox_event(engine: Engine, outbox_event_id: uuid.UUID) -> OutboxEvent:
+    with UnitOfWork(engine, ServiceScope()) as uow:
+        return uow.session.get_one(OutboxEvent, outbox_event_id)
+
+
+def test_a_launched_task_takes_its_lease_while_the_publisher_is_still_launching(
+    runtime_engine: Engine, runtime_url: URL, new_tenant: NewTenant
+) -> None:
+    outbox_event_id = record_downstream_event(runtime_engine, new_tenant())
+    # The child's connection gives up on a row lock after two seconds instead of waiting.
+    impatient = create_engine(
+        runtime_url, poolclass=NullPool, connect_args={"options": "-c lock_timeout=2000"}
+    )
+    claims: list[Lease | Declined] = []
+
+    class ChildStartingLauncher:
+        """Starts the task inside ``launch``, as a fast execution service may."""
+
+        async def launch(self, task: TaskInput) -> str:
+            claims.append(
+                acquire_lease(
+                    impatient, task, now=utc_now(), lease_duration=LEASE, policy=RetryPolicy()
+                )
+            )
+            return "started"
+
+    try:
+        published = asyncio.run(
+            OutboxPublisher(runtime_engine, ChildStartingLauncher()).publish([outbox_event_id])
+        )
+    finally:
+        impatient.dispose()
+
+    assert published == 1
+    assert len(claims) == 1
+    assert isinstance(claims[0], Lease)
+    assert load_outbox_event(runtime_engine, outbox_event_id).state == "PUBLISHED"
+
+
+def test_a_claimed_outbox_event_is_not_relaunched_until_its_claim_expires(
+    runtime_engine: Engine, new_tenant: NewTenant, make_runtime: Callable[..., TaskRuntime]
+) -> None:
+    outbox_event_id = record_downstream_event(runtime_engine, new_tenant())
+    downstream = downstream_run_id(outbox_event_id)
+    claimed_at = later(timedelta(seconds=20))
+    # The publisher claims the event, then dies while launching it.
+    with pytest.raises(SimulatedCrashError):
+        asyncio.run(
+            OutboxPublisher(runtime_engine, CrashingLauncher(), clock=claimed_at).publish(
+                [outbox_event_id]
+            )
+        )
+    assert load_run(runtime_engine, downstream).launch_count == 1
+
+    recorder = RecordingLauncher()
+    asyncio.run(
+        run_scheduled("outbox-sweep", make_runtime(recorder, clock=later(timedelta(seconds=31))))
+    )
+    assert downstream not in recorder.launched_runs()  # still claimed by the dead publisher
+
+    asyncio.run(
+        run_scheduled("outbox-sweep", make_runtime(recorder, clock=later(timedelta(seconds=51))))
+    )
+    assert [task.idempotency_key for task in recorder.launched] == [f"{downstream}.2"]
+    assert load_outbox_event(runtime_engine, outbox_event_id).state == "PUBLISHED"
+
+
+def test_a_handler_holds_no_transaction_while_it_works(
+    runtime_engine: Engine, new_tenant: NewTenant, make_runtime: Callable[..., TaskRuntime]
+) -> None:
+    tenant, subject = new_tenant(), uuid.uuid4()
+    run_id = admit(runtime_engine, tenant, subject=subject)
+    open_transactions: list[int] = []
+
+    async def slow_source(context: TaskContext) -> TaskResult:
+        result = await record_subject(context)
+        await asyncio.sleep(0.2)  # waiting on a slow source
+        with runtime_engine.connect() as observer:
+            open_transactions.append(
+                observer.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = "
+                        "current_database() AND usename = current_user AND "
+                        "pid <> pg_backend_pid() AND xact_start IS NOT NULL"
+                    )
+                ).scalar_one()
+            )
+        return result
+
+    runtime = make_runtime(tasks={"record-subject": slow_source})
+    assert asyncio.run(run_task(task_for(runtime_engine, run_id), runtime)) == "complete"
+
+    assert open_transactions == [0]
+    assert recorded_count(runtime_engine, tenant, subject) == 1
+
+
+def test_runtime_connections_end_transactions_left_idle(runtime_engine: Engine) -> None:
+    with runtime_engine.connect() as connection:
+        timeout = connection.execute(text("SHOW idle_in_transaction_session_timeout")).scalar()
+
+    assert timeout == "1min"
+
+
+def test_an_expired_idempotency_key_admits_a_new_run(
+    runtime_engine: Engine, new_tenant: NewTenant
+) -> None:
+    tenant, key = new_tenant(), uuid.uuid4().hex
+    long_ago = utc_now() - IDEMPOTENCY_TTL - timedelta(minutes=1)
+    first = admit(runtime_engine, tenant, key=key, now=long_ago)
+
+    second = admit(runtime_engine, tenant, key=key)
+    replay = admit(runtime_engine, tenant, key=key)
+
+    assert second != first
+    assert replay == second
+
+
+def test_repair_prunes_expired_idempotency_records_in_bounded_batches(
+    runtime_engine: Engine, new_tenant: NewTenant, make_runtime: Callable[..., TaskRuntime]
+) -> None:
+    tenant = new_tenant()
+    long_ago = utc_now() - IDEMPOTENCY_TTL - timedelta(minutes=1)
+    expired = {uuid.uuid4().hex for _ in range(3)}
+    for key in expired:
+        admit(runtime_engine, tenant, key=key, now=long_ago)
+    current = uuid.uuid4().hex
+    admit(runtime_engine, tenant, key=current)
+
+    def keys() -> set[str]:
+        with UnitOfWork(runtime_engine, tenant) as uow:
+            return set(uow.session.scalars(select(IdempotencyRecord.idempotency_key)))
+
+    assert prune_idempotency_records(runtime_engine, now=utc_now(), batch_size=2) == 2
+    assert len(keys() & expired) == 1
+    asyncio.run(run_scheduled("repair", make_runtime()))
+    assert keys() == {current}
 
 
 def test_cli_outbox_sweep_exits_cleanly(

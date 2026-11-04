@@ -33,7 +33,7 @@ from property_focus.adapters.db.repositories import (
     TenantScope,
     UnitOfWork,
 )
-from property_focus.application.workflows import utc_now
+from property_focus.application.workflows import NewEvent, record_event, utc_now
 from property_focus.cli import FIXTURES_DIR, SEED_DATASETS, main
 from property_focus.config import Settings
 
@@ -60,6 +60,35 @@ def _set_tenant(connection: Connection, tenant: TenantScope) -> None:
     connection.execute(
         text("SELECT set_config('pf.tenant_id', :tenant, true)"), {"tenant": str(tenant.tenant_id)}
     )
+    connection.execute(
+        text("SELECT set_config('pf.user_id', :user, true)"), {"user": str(tenant.user_id)}
+    )
+
+
+def _record_tenant_event(engine: Engine, tenant: TenantScope) -> uuid.UUID:
+    """Record one domain event in ``tenant``, with an outbox event and a processed mark;
+    return the domain event's ID."""
+    event = NewEvent(
+        event_type="subject.changed",
+        aggregate_type="property",
+        aggregate_id=uuid.uuid4(),
+        aggregate_revision=1,
+        destinations=("record-subject",),
+    )
+    with UnitOfWork(engine, tenant) as uow:
+        record_event(uow.session, event, tenant_id=tenant.tenant_id, now=utc_now())
+        event_id = uow.session.execute(
+            text("SELECT id FROM domain_events WHERE aggregate_id = :aggregate"),
+            {"aggregate": event.aggregate_id},
+        ).scalar_one()
+        uow.session.execute(
+            text(
+                "INSERT INTO processed_events (consumer, domain_event_id, tenant_id) "
+                "VALUES ('record-subject', :event, :tenant)"
+            ),
+            {"event": event_id, "tenant": tenant.tenant_id},
+        )
+    return uuid.UUID(str(event_id))
 
 
 def _sqlstate(error: DBAPIError) -> str | None:
@@ -96,6 +125,78 @@ def test_runtime_role_cannot_read_another_tenants_rows_with_raw_sql(
         # Outside any scope nothing tenant-scoped is visible.
         with runtime_engine.begin() as connection:
             assert connection.execute(text(f"SELECT count(*) FROM {table}")).scalar_one() == 0
+
+
+def test_runtime_role_cannot_read_another_users_identity_rows_with_raw_sql(
+    runtime_engine: Engine, new_tenant: NewTenant
+) -> None:
+    a, b = new_tenant(), new_tenant()
+
+    with runtime_engine.begin() as connection:
+        _set_tenant(connection, b)
+        users = connection.execute(text("SELECT id, email FROM users")).all()
+        tenants = connection.execute(text("SELECT id FROM tenants")).scalars().all()
+        user_a = connection.execute(
+            text("SELECT count(*) FROM users WHERE id = :a"), {"a": a.user_id}
+        ).scalar_one()
+    assert [user_id for user_id, _ in users] == [b.user_id]
+    assert tenants == [b.tenant_id]
+    assert user_a == 0
+
+    # Only the provisioning function changes a stored email.
+    with runtime_engine.connect() as connection:
+        _set_tenant(connection, b)
+        with pytest.raises(DBAPIError) as raised:
+            connection.execute(text("UPDATE users SET email = 'taken@example.test'"))
+    assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
+
+    # Outside any scope no identity row is visible.
+    with runtime_engine.begin() as connection:
+        assert connection.execute(text("SELECT count(*) FROM users")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM tenants")).scalar_one() == 0
+
+
+def test_runtime_role_cannot_read_another_tenants_events_with_raw_sql(
+    runtime_engine: Engine, new_tenant: NewTenant
+) -> None:
+    a, b = new_tenant(), new_tenant()
+    event_of_a, event_of_b = (
+        _record_tenant_event(runtime_engine, a),
+        _record_tenant_event(runtime_engine, b),
+    )
+
+    queries = {
+        "domain_events": "SELECT id FROM domain_events",
+        "outbox_events": "SELECT domain_event_id FROM outbox_events",
+        "processed_events": "SELECT domain_event_id FROM processed_events",
+    }
+    for table, query in queries.items():
+        with runtime_engine.begin() as connection:
+            _set_tenant(connection, b)
+            assert set(connection.execute(text(query)).scalars()) == {event_of_b}, table
+        with runtime_engine.begin() as connection:
+            assert connection.execute(text(query)).all() == [], table
+        with UnitOfWork(runtime_engine, ServiceScope()) as uow:
+            visible = set(uow.session.execute(text(query)).scalars())
+            assert {event_of_a, event_of_b} <= visible, table
+
+
+def test_account_provisioning_runs_through_a_pinned_security_definer_function(
+    runtime_engine: Engine,
+) -> None:
+    with runtime_engine.connect() as connection:
+        definer, config, public_execute, runtime_execute = connection.execute(
+            text(
+                "SELECT p.prosecdef, p.proconfig, "
+                "has_function_privilege('public', p.oid, 'EXECUTE'), "
+                "has_function_privilege('pf_runtime', p.oid, 'EXECUTE') "
+                "FROM pg_proc p WHERE p.proname = 'pf_provision_account'"
+            )
+        ).one()
+
+    assert definer
+    assert "search_path=pg_catalog, public, pg_temp" in config
+    assert (public_execute, runtime_execute) == (False, True)
 
 
 def test_runtime_role_cannot_write_rows_into_another_tenant(
@@ -214,6 +315,20 @@ def test_every_tenant_private_table_forces_row_security(runtime_engine: Engine) 
     assert all(forced.values()), forced
 
 
+def test_identity_and_event_tables_force_row_security(runtime_engine: Engine) -> None:
+    tables = ("users", "tenants", "domain_events", "outbox_events", "processed_events")
+    with runtime_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT relname, relrowsecurity AND relforcerowsecurity FROM pg_class "
+                "WHERE relnamespace = 'public'::regnamespace AND relname = ANY(:tables)"
+            ),
+            {"tables": list(tables)},
+        ).all()
+
+    assert dict(rows) == dict.fromkeys(tables, True)
+
+
 def test_service_scope_sees_every_workflow_run_but_no_private_rows(
     runtime_engine: Engine, new_tenant: NewTenant
 ) -> None:
@@ -299,8 +414,8 @@ def _bearer(keycloak: LocalKeycloak, user: TestUser) -> dict[str, str]:
 def _tenants_of(engine: Engine, keycloak: LocalKeycloak, user: TestUser) -> list[TenantScope]:
     """Every (user, owned tenant) pair stored for ``user``'s issuer and subject."""
     subject = keycloak.pkce_sign_in(user).access_claims["sub"]
-    with engine.connect() as connection:
-        rows = connection.execute(
+    with UnitOfWork(engine, ServiceScope()) as uow:
+        rows = uow.session.execute(
             select(User.id, Tenant.id)
             .join(Tenant, Tenant.owner_user_id == User.id, isouter=True)
             .where(User.issuer == ISSUER, User.subject == subject)
@@ -322,8 +437,8 @@ def test_first_request_provisions_one_user_and_tenant_and_a_repeat_creates_nothi
     assert len(provisioned) == 1
     assert provisioned[0].tenant_id is not None
     assert _tenants_of(runtime_engine, keycloak, user) == provisioned
-    with runtime_engine.connect() as connection:
-        email, verified = connection.execute(
+    with UnitOfWork(runtime_engine, provisioned[0]) as uow:
+        email, verified = uow.session.execute(
             select(User.email, User.email_verified).where(User.id == provisioned[0].user_id)
         ).one()
     assert (email, verified) == (user.email, True)
@@ -385,8 +500,8 @@ def test_seeding_the_synthetic_dataset_twice_creates_its_accounts_once(
     subjects = [entry["subject"] for entry in accounts]
 
     def seeded() -> list[tuple[str, int]]:
-        with runtime_engine.connect() as connection:
-            rows = connection.execute(
+        with UnitOfWork(runtime_engine, ServiceScope()) as uow:
+            rows = uow.session.execute(
                 select(User.subject, func.count(Tenant.id))
                 .join(Tenant, Tenant.owner_user_id == User.id, isouter=True)
                 .where(User.subject.in_(subjects))

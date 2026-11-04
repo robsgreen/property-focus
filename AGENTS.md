@@ -110,7 +110,7 @@ backend/
     adapters/secrets.py    secret providers
     adapters/telemetry.py  OTel, JSON logs, redaction
     runtime/               run_task, launchers, scheduled kinds, scheduler, Lambda handler
-  migrations/              Alembic (versions/0001_foundation.py)
+  migrations/              Alembic (versions/NNNN_*.py, one per appended change)
   scripts/                 dev, export_openapi, keycloak_realm, checks, smoke, compatibility
   tests/                   unit, integration, contract, support
 frontend/src/              main.tsx, auth/session.ts, app/ (router, store), api/ (generated client)

@@ -22,12 +22,20 @@ the caller's transaction. After commit, ``OutboxPublisher`` launches each run an
 outbox event published; ``OutboxPublisher.sweep`` launches what a crash left pending.
 Delivery is therefore at least once, and a run's lease makes duplicates harmless.
 
+Idempotency records replay their key for ``IDEMPOTENCY_TTL``; the scheduled ``repair``
+task deletes expired ones (``prune_idempotency_records``).
+
+The coroutines here run their database work in a worker thread (``asyncio.to_thread``),
+so a slow query never blocks the caller's event loop, and never hold a transaction open
+while they await a launch.
+
 Every run and outbox event records the trace context it was created in. Publishing an
 event and running a run's task continue that trace across the asynchronous hop
 (``telemetry.resume_trace``), so one trace follows the work from the request that started
 it through every downstream task.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -38,7 +46,7 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from typing import Any, Literal
 
-from sqlalchemy import Engine, and_, or_, select
+from sqlalchemy import ColumnElement, Engine, and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -77,6 +85,9 @@ ALLOWED_TRANSITIONS: Mapping[str, frozenset[str]] = {
 
 # A run admitted without an explicit deadline stops retrying this long after admission.
 DEFAULT_RUN_DEADLINE = timedelta(hours=24)
+# An idempotency key replays its first request for this long after that request; later it
+# admits a new one.
+IDEMPOTENCY_TTL = timedelta(hours=24)
 # Runs launched from an outbox event derive their ID from it (see ``downstream_run_id``).
 _OUTBOX_RUN_NAMESPACE = uuid.UUID("0b6c1d2e-7f4a-4c55-9a43-5e2f8d7c9b10")
 # Version of this application, carried in each TaskInput it builds.
@@ -236,15 +247,18 @@ def admit_run(
     now: datetime,
     correlation_id: str | None = None,
     deadline: timedelta = DEFAULT_RUN_DEADLINE,
+    idempotency_ttl: timedelta = IDEMPOTENCY_TTL,
 ) -> Admission:
     """Admit a ``QUEUED`` run of ``kind`` for the tenant of ``uow``, at most once per key.
 
     The idempotency record and the run commit with the caller's transaction. Repeating
-    ``idempotency_key`` for ``operation`` with the same kind and subject returns the first
-    request's run as replayed, also when the two requests run concurrently (the second
-    waits for the first to commit); with anything else it raises ``CodedError``
-    ``idempotency_conflict``. The caller launches the run after commit; ``repair`` launches
-    one that a crash left unlaunched. Raises ``TypeError`` outside a tenant scope.
+    ``idempotency_key`` for ``operation`` within ``idempotency_ttl`` of its first request,
+    with the same kind and subject, returns that request's run as replayed, also when the
+    two requests run concurrently (the second waits for the first to commit); with anything
+    else it raises ``CodedError`` ``idempotency_conflict``. Once the key has expired it
+    admits a new run, as for a new key. The caller launches the run after commit;
+    ``repair`` launches one that a crash left unlaunched. Raises ``TypeError`` outside a
+    tenant scope.
     """
     if not isinstance(uow.scope, TenantScope):
         raise TypeError("idempotent admission needs a tenant scope")
@@ -252,26 +266,35 @@ def admit_run(
     request_digest = input_digest({"kind": kind, "input": run_input})
     session = uow.session
     run_id = uuid.uuid4()
+    record = insert(IdempotencyRecord).values(
+        tenant_id=uow.scope.tenant_id,
+        operation=operation,
+        idempotency_key=idempotency_key,
+        request_digest=request_digest,
+        state="COMPLETE",
+        result_id=run_id,
+        expires_at=now + idempotency_ttl,
+    )
     # A concurrent request with the same key holds its record until it commits or rolls
-    # back; the insert waits for it, then either records this request or does nothing.
+    # back; the insert waits for it, then records this request, replaces an expired
+    # record with it, or does nothing.
     recorded = session.execute(
-        insert(IdempotencyRecord)
-        .values(
-            tenant_id=uow.scope.tenant_id,
-            operation=operation,
-            idempotency_key=idempotency_key,
-            request_digest=request_digest,
-            state="COMPLETE",
-            result_id=run_id,
-        )
-        .on_conflict_do_nothing(
+        record.on_conflict_do_update(
             index_elements=[
                 IdempotencyRecord.tenant_id,
                 IdempotencyRecord.operation,
                 IdempotencyRecord.idempotency_key,
-            ]
-        )
-        .returning(IdempotencyRecord.id)
+            ],
+            set_={
+                "request_digest": record.excluded.request_digest,
+                "state": record.excluded.state,
+                "result_id": record.excluded.result_id,
+                "expires_at": record.excluded.expires_at,
+                "created_at": func.now(),
+                "updated_at": func.now(),
+            },
+            where=IdempotencyRecord.expires_at <= now,
+        ).returning(IdempotencyRecord.id)
     ).scalar_one_or_none()
     if recorded is None:
         existing = session.scalars(
@@ -298,6 +321,27 @@ def admit_run(
     )
     session.flush()
     return Admission(run_id, replayed=False)
+
+
+def prune_idempotency_records(engine: Engine, *, now: datetime, batch_size: int = 1000) -> int:
+    """Delete up to ``batch_size`` idempotency records that expired by ``now``, oldest first;
+    return how many were deleted.
+
+    Runs in the service scope, which row security lets see and delete expired records only.
+    """
+    with UnitOfWork(engine, ServiceScope()) as uow:
+        expired = (
+            select(IdempotencyRecord.id)
+            .where(IdempotencyRecord.expires_at <= now)
+            .order_by(IdempotencyRecord.expires_at)
+            .limit(batch_size)
+        )
+        deleted = uow.session.scalars(
+            delete(IdempotencyRecord)
+            .where(IdempotencyRecord.id.in_(expired.scalar_subquery()))
+            .returning(IdempotencyRecord.id)
+        ).all()
+        return len(deleted)
 
 
 def _new_run(
@@ -400,6 +444,7 @@ def record_event(
     """
     domain_event = DomainEvent(
         id=uuid.uuid4(),
+        tenant_id=tenant_id,
         event_type=event.event_type,
         schema_version=event.schema_version,
         aggregate_type=event.aggregate_type,
@@ -422,6 +467,7 @@ def record_event(
         outbox_event = OutboxEvent(
             id=uuid.uuid4(),
             domain_event_id=domain_event.id,
+            tenant_id=tenant_id,
             destination=destination,
             trace_context=trace_context,
         )
@@ -446,14 +492,27 @@ def record_event(
 class OutboxPublisher:
     """Launches the runs that outbox events stand for, and marks the events published.
 
-    Each event is locked while it is launched, so a concurrent ``sweep`` skips it. A
-    launch that fails leaves the event pending for the next sweep; a crash after a launch
-    but before the event is marked published makes the next sweep launch it again, which
-    the run's lease turns into a harmless duplicate.
+    Each event is published in three steps, so no transaction is open while the launch
+    runs and the launched task can take its lease at once:
+
+    1. Claim, in one short transaction: count the run's next launch (``next_launch``) and
+       mark the event claimed until ``CLAIM_DURATION`` from now. Every launch therefore
+       has its own launch count, and a concurrent ``publish`` or ``sweep`` skips the
+       event while the claim lasts.
+    2. Launch, outside any transaction.
+    3. Mark the event published, in a second short transaction.
+
+    A launch that fails, or a crash after the claim, leaves the event pending; the first
+    sweep after its claim expires launches it again. A crash after a launch but before the
+    event is marked published makes that sweep launch it a second time, which the run's
+    lease turns into a harmless duplicate.
     """
 
     # The sweep leaves recent events to the task that committed them.
     SWEEP_MIN_AGE = timedelta(seconds=30)
+    # How long a claimed event is left to its publisher's launch. A launch takes seconds;
+    # one that outlasts its claim may be launched again by a sweep, harmlessly.
+    CLAIM_DURATION = timedelta(seconds=30)
 
     def __init__(
         self, engine: Engine, launcher: TaskLauncher, *, clock: Callable[[], datetime] = utc_now
@@ -463,7 +522,7 @@ class OutboxPublisher:
         self._clock = clock
 
     async def publish(self, outbox_event_ids: Iterable[uuid.UUID]) -> int:
-        """Launch each still-pending event among ``outbox_event_ids``; return how many."""
+        """Launch each pending, unclaimed event among ``outbox_event_ids``; return how many."""
         published = 0
         for outbox_event_id in outbox_event_ids:
             if await self._publish_one(outbox_event_id):
@@ -471,52 +530,88 @@ class OutboxPublisher:
         return published
 
     async def sweep(self, *, batch_size: int = 100) -> int:
-        """Launch events pending for longer than ``SWEEP_MIN_AGE``, oldest first.
+        """Launch events pending for longer than ``SWEEP_MIN_AGE`` and not claimed by a
+        live publisher, oldest first.
 
         Handles at most ``batch_size`` events; returns how many it launched.
         """
-        cutoff = self._clock() - self.SWEEP_MIN_AGE
+        return await self.publish(await asyncio.to_thread(self._sweepable, batch_size))
+
+    def _sweepable(self, batch_size: int) -> Sequence[uuid.UUID]:
+        now = self._clock()
         with UnitOfWork(self._engine, ServiceScope()) as uow:
-            pending = uow.session.scalars(
+            return uow.session.scalars(
                 select(OutboxEvent.id)
-                .where(OutboxEvent.state == "PENDING", OutboxEvent.created_at < cutoff)
+                .where(
+                    OutboxEvent.state == "PENDING",
+                    OutboxEvent.created_at < now - self.SWEEP_MIN_AGE,
+                    _claim_lapsed(now),
+                )
                 .order_by(OutboxEvent.created_at)
                 .limit(batch_size)
             ).all()
-        return await self.publish(pending)
 
     async def _publish_one(self, outbox_event_id: uuid.UUID) -> bool:
+        claim = await asyncio.to_thread(self._claim, outbox_event_id)
+        if claim is None:
+            return False
+        task, trace_context = claim
+        attributes = {
+            "property_focus.outbox_event_id": str(outbox_event_id),
+            "property_focus.workflow_run_id": str(task.workflow_run_id),
+            "property_focus.task_kind": task.task_kind,
+        }
+        with resume_trace(f"publish {task.task_kind}", trace_context, attributes=attributes):
+            try:
+                await self._launcher.launch(task)
+            except Exception:
+                logger.exception(
+                    "launching run %s for outbox event %s failed",
+                    task.workflow_run_id,
+                    outbox_event_id,
+                )
+                return False
+        await asyncio.to_thread(self._mark_published, outbox_event_id)
+        return True
+
+    def _claim(self, outbox_event_id: uuid.UUID) -> tuple[TaskInput, Mapping[str, str]] | None:
+        """Claim the event and count its run's next launch; return the launch's envelope and
+        the event's trace context, or None when the event is published, claimed or locked."""
+        now = self._clock()
         with UnitOfWork(self._engine, ServiceScope()) as uow:
             session = uow.session
             event = session.scalars(
                 select(OutboxEvent)
-                .where(OutboxEvent.id == outbox_event_id, OutboxEvent.state == "PENDING")
+                .where(
+                    OutboxEvent.id == outbox_event_id,
+                    OutboxEvent.state == "PENDING",
+                    _claim_lapsed(now),
+                )
                 .with_for_update(skip_locked=True)
             ).one_or_none()
-            if event is None:  # already published, or being published right now
-                return False
+            if event is None:
+                return None
             event.publish_attempts += 1
             # Locked so that a concurrent repair pass cannot count the same launch.
             run = session.get(WorkflowRun, downstream_run_id(event.id), with_for_update=True)
             if run is None:
                 logger.error("outbox event %s has no run to launch", event.id)
-                return False
-            attributes = {
-                "property_focus.outbox_event_id": str(event.id),
-                "property_focus.workflow_run_id": str(run.id),
-                "property_focus.task_kind": run.kind,
-            }
-            with resume_trace(f"publish {run.kind}", event.trace_context, attributes=attributes):
-                try:
-                    await self._launcher.launch(next_launch(run))
-                except Exception:
-                    logger.exception(
-                        "launching run %s for outbox event %s failed", run.id, event.id
-                    )
-                    return False
-            event.state = "PUBLISHED"
-            event.published_at = self._clock()
-            return True
+                return None
+            event.claim_expires_at = now + self.CLAIM_DURATION
+            return next_launch(run), dict(event.trace_context)
+
+    def _mark_published(self, outbox_event_id: uuid.UUID) -> None:
+        with UnitOfWork(self._engine, ServiceScope()) as uow:
+            uow.session.execute(
+                update(OutboxEvent)
+                .where(OutboxEvent.id == outbox_event_id, OutboxEvent.state == "PENDING")
+                .values(state="PUBLISHED", published_at=self._clock(), claim_expires_at=None)
+            )
+
+
+def _claim_lapsed(now: datetime) -> ColumnElement[bool]:
+    """SQL condition: no publisher's claim on the outbox event is live at ``now``."""
+    return or_(OutboxEvent.claim_expires_at.is_(None), OutboxEvent.claim_expires_at <= now)
 
 
 async def relaunch_stalled_runs(
@@ -537,6 +632,24 @@ async def relaunch_stalled_runs(
     ``batch_size`` runs; returns how many it launched. A run that is also launched
     elsewhere starts once: the lease decides.
     """
+    launches = await asyncio.to_thread(
+        _count_relaunches, engine, now=now, stranded_after=stranded_after, batch_size=batch_size
+    )
+    launched = 0
+    for task in launches:
+        try:
+            await launcher.launch(task)
+        except Exception:
+            logger.exception("relaunching run %s failed", task.workflow_run_id)
+        else:
+            launched += 1
+    return launched
+
+
+def _count_relaunches(
+    engine: Engine, *, now: datetime, stranded_after: timedelta, batch_size: int
+) -> list[TaskInput]:
+    """Count the next launch of each stalled run and return their envelopes, committed."""
     with UnitOfWork(engine, ServiceScope()) as uow:
         runs = uow.session.scalars(
             select(WorkflowRun)
@@ -559,15 +672,7 @@ async def relaunch_stalled_runs(
                 launches.append(next_launch(run))
             except (KeyError, ValueError):  # a malformed run must not stop the whole pass
                 logger.exception("run %s has no valid task input", run.id)
-    launched = 0
-    for task in launches:
-        try:
-            await launcher.launch(task)
-        except Exception:
-            logger.exception("relaunching run %s failed", task.workflow_run_id)
-        else:
-            launched += 1
-    return launched
+    return launches
 
 
 # Leases ------------------------------------------------------------------------------

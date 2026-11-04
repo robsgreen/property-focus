@@ -9,10 +9,9 @@ from this mapping, never from a path, query or body field.
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import Connection, Engine, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import Connection, Engine, select, text
 
-from property_focus.adapters.db.models import Tenant, User, UserRole
+from property_focus.adapters.db.models import UserRole
 from property_focus.adapters.db.repositories import TenantScope
 
 
@@ -55,49 +54,22 @@ class ExecutionContext:
 def provision_tenant(connection: Connection, identity: VerifiedIdentity) -> TenantScope:
     """Return the scope of the tenant ``identity`` owns, creating its user and tenant if absent.
 
-    Runs in the caller's transaction. Concurrent calls for the same new identity create one
-    user and one tenant: inserts that lose the race do nothing, and the rows are read back.
-    The email is stored only when the token marks it verified; a newly verified or changed
-    email replaces the stored one. Unverified identities are stored with an empty email.
+    Runs in the caller's transaction, through the database function
+    ``pf_provision_account`` (migration 0002): row security shows a tenant scope only its
+    own user and tenant, and before this call the caller has no scope. Concurrent calls
+    for the same new identity create one user and one tenant. The email is stored only
+    when the token marks it verified; a newly verified or changed email replaces the
+    stored one. Unverified identities are stored with an empty email.
     """
     email = identity.email if identity.email_verified and identity.email else ""
-    by_identity = (User.issuer == identity.issuer) & (User.subject == identity.subject)
-
-    user = connection.execute(
-        select(User.id, User.email, User.email_verified).where(by_identity)
-    ).one_or_none()
-    if user is None:
-        connection.execute(
-            insert(User)
-            .values(
-                issuer=identity.issuer,
-                subject=identity.subject,
-                email=email,
-                email_verified=bool(email),
-            )
-            .on_conflict_do_nothing(index_elements=[User.issuer, User.subject])
-        )
-        user = connection.execute(
-            select(User.id, User.email, User.email_verified).where(by_identity)
-        ).one()
-    elif email and (user.email, user.email_verified) != (email, True):
-        connection.execute(
-            update(User).where(User.id == user.id).values(email=email, email_verified=True)
-        )
-
-    tenant_id = connection.execute(
-        select(Tenant.id).where(Tenant.owner_user_id == user.id)
-    ).scalar_one_or_none()
-    if tenant_id is None:
-        connection.execute(
-            insert(Tenant)
-            .values(owner_user_id=user.id)
-            .on_conflict_do_nothing(index_elements=[Tenant.owner_user_id])
-        )
-        tenant_id = connection.execute(
-            select(Tenant.id).where(Tenant.owner_user_id == user.id)
-        ).scalar_one()
-    return TenantScope(tenant_id=tenant_id, user_id=user.id)
+    user_id, tenant_id = connection.execute(
+        text(
+            "SELECT account_user_id, account_tenant_id "
+            "FROM pf_provision_account(:issuer, :subject, :email)"
+        ),
+        {"issuer": identity.issuer, "subject": identity.subject, "email": email},
+    ).one()
+    return TenantScope(tenant_id=tenant_id, user_id=user_id)
 
 
 def resolve_context(
@@ -107,8 +79,8 @@ def resolve_context(
 
     Provisions the caller's user and tenant on their first request (``provision_tenant``)
     and reads their system roles, in one transaction on the runtime role. The transaction
-    sets no tenant scope: it touches only the identity tables, which hold no tenant-private
-    rows.
+    sets no tenant scope: provisioning runs in its own database function, and
+    ``user_roles`` holds no tenant-private rows.
     """
     with engine.begin() as connection:
         scope = provision_tenant(connection, identity)

@@ -252,6 +252,11 @@ class IdempotencyRecord(Base):
     state: Mapped[str] = mapped_column(Text, server_default="IN_PROGRESS")
     result_id: Mapped[uuid.UUID | None]
     lease_expires_at: Mapped[datetime | None]
+    # The key replays until this time; afterwards it admits a new request, and the repair
+    # task deletes the record.
+    expires_at: Mapped[datetime] = mapped_column(
+        index=True, server_default=text("now() + interval '24 hours'")
+    )
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
@@ -263,6 +268,8 @@ class DomainEvent(Base):
     __table_args__ = (Index(None, "aggregate_type", "aggregate_id"),)
 
     id: Mapped[uuid.UUID] = _uuid_pk()
+    # The tenant whose change the event records, or NULL for shared work.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id"))
     event_type: Mapped[str] = mapped_column(Text)
     # Version of the payload's shape for this event type.
     schema_version: Mapped[int] = mapped_column(Integer)
@@ -291,10 +298,15 @@ class OutboxEvent(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     domain_event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("domain_events.id"))
+    # The domain event's tenant, or NULL for shared work.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id"))
     # The downstream task kind this event launches.
     destination: Mapped[str] = mapped_column(Text)
     state: Mapped[str] = mapped_column(Text, server_default="PENDING")
     publish_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    # A publisher has counted a launch and is launching it until this time; NULL when no
+    # launch is under way. An expired claim is a publisher that died mid-launch.
+    claim_expires_at: Mapped[datetime | None]
     trace_context: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = _created_at()
     published_at: Mapped[datetime | None]
@@ -309,6 +321,8 @@ class ProcessedEvent(Base):
     domain_event_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("domain_events.id"), primary_key=True
     )
+    # The domain event's tenant, or NULL for shared work.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tenants.id"))
     processed_at: Mapped[datetime] = _created_at()
 
 

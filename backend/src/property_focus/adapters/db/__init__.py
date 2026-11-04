@@ -7,6 +7,7 @@ application through ``repositories.UnitOfWork`` and is subject to row-level secu
 roles, privileges and policies change in later migrations.
 """
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +21,12 @@ from property_focus.config import Settings
 
 # backend/alembic.ini, found relative to this package in the source tree and in images.
 ALEMBIC_INI = Path(__file__).resolve().parents[4] / "alembic.ini"
+
+# A session left idle inside a transaction this long is ended by the server, releasing its
+# locks. Every runtime transaction is short (a request's unit of work, a lease grant, a
+# task's final commit, an outbox claim): none waits on anything but the database, and the
+# longest takes well under a second, so a minute only ever catches a leak.
+IDLE_IN_TRANSACTION_TIMEOUT = timedelta(minutes=1)
 
 # The two roles that connect: the runtime role serves the application, the migration owner
 # runs migrations.
@@ -57,16 +64,22 @@ def create_database_engine(url: str | URL, *, pool_size: int = 5) -> Engine:
     """Create a bounded connection pool whose sessions use UTC.
 
     The pool holds at most ``pool_size`` connections and never overflows, so a process
-    cannot exhaust the server's connection limit. Statement parameters (which can hold
+    cannot exhaust the server's connection limit. The server ends a session left idle in a
+    transaction for ``IDLE_IN_TRANSACTION_TIMEOUT``. Statement parameters (which can hold
     private values such as email addresses) are left out of error messages and logs.
     """
+    idle_milliseconds = int(IDLE_IN_TRANSACTION_TIMEOUT.total_seconds() * 1000)
     return create_engine(
         url,
         pool_size=pool_size,
         max_overflow=0,
         pool_pre_ping=True,
         hide_parameters=True,
-        connect_args={"options": "-c timezone=UTC"},
+        connect_args={
+            "options": (
+                f"-c timezone=UTC -c idle_in_transaction_session_timeout={idle_milliseconds}"
+            )
+        },
     )
 
 

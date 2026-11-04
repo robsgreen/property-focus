@@ -2,9 +2,10 @@
 
 Every task execution, whether a dogfood process (``cli run-task``), a Lambda invocation
 (``lambda_handler``) or a Fargate container, calls ``run_task``. It takes the lease on the
-workflow run the envelope names, runs the registered handler in the run's own scope,
-commits the handler's writes together with the run's result, and then launches the
-downstream tasks the handler's events name.
+workflow run the envelope names, runs the registered handler outside any database
+transaction, commits the writes the handler staged together with the run's result in one
+short transaction in the run's own scope, and then launches the downstream tasks the
+handler's events name.
 
 Tasks act with the runtime's workload credentials (the runtime database role and the
 secret provider), never with a user's token. A task for a tenant runs in that tenant's
@@ -87,34 +88,40 @@ class TaskResult:
     result_refs: Sequence[str] = ()
 
 
+# A database write a handler stages: it gets the unit of work of the transaction that
+# commits the task's result, in the run's scope.
+type StagedWrite = Callable[[UnitOfWork], object]
+
+
 @dataclass
 class TaskContext:
-    """What a handler gets: its envelope, a unit of work in the run's scope, and secrets.
+    """What a handler gets: its envelope and secrets, and where it stages its result.
 
-    Writes through ``uow`` commit only if the handler returns and its lease is still
-    current. A handler reports a failure by raising ``CodedError``; any other exception
-    is recorded as ``internal_defect``.
+    The handler runs outside any database transaction, so waiting on a source holds no
+    locks or connection. It stages its database writes (``write``) and events (``emit``);
+    after it returns, ``run_task`` applies them in one short transaction with the run's
+    result, and only while the handler's lease is still current. A handler reports a
+    failure by raising ``CodedError``; any other exception is recorded as
+    ``internal_defect``. Either way nothing it staged is written.
     """
 
     task: TaskInput
-    uow: UnitOfWork
     secrets: SecretProvider
     # The tenant the run belongs to, or None for shared work.
     tenant_id: uuid.UUID | None
     correlation_id: str | None
     now: datetime
-    outbox_event_ids: list[uuid.UUID] = field(default_factory=list)
+    _writes: list[StagedWrite] = field(default_factory=list, init=False, repr=False)
+    _events: list[NewEvent] = field(default_factory=list, init=False, repr=False)
+
+    def write(self, apply: StagedWrite) -> None:
+        """Stage ``apply`` to run, after the writes staged before it, in the transaction that
+        commits this task's result."""
+        self._writes.append(apply)
 
     def emit(self, event: NewEvent) -> None:
         """Record ``event`` with this task's result; its destinations launch after commit."""
-        self.outbox_event_ids += record_event(
-            self.uow.session,
-            event,
-            tenant_id=self.tenant_id,
-            now=self.now,
-            parent_run_id=self.task.workflow_run_id,
-            correlation_id=self.correlation_id,
-        )
+        self._events.append(event)
 
 
 type TaskHandler = Callable[[TaskContext], Awaitable[TaskResult]]
@@ -129,7 +136,9 @@ class TaskRuntime:
     """Everything tasks share within one process.
 
     ``lease_duration`` must exceed the longest handler run; a task still running when its
-    lease expires may be superseded, and its result is then discarded.
+    lease expires may be superseded, and its result is then discarded. No transaction is
+    open while a handler runs, so the lease, not the database's idle-transaction timeout,
+    bounds it.
     """
 
     engine: Engine
@@ -218,20 +227,21 @@ async def _run_leased(task: TaskInput, lease: Lease, runtime: TaskRuntime) -> Ta
 async def _execute(
     task: TaskInput, lease: Lease, runtime: TaskRuntime
 ) -> tuple[TaskResult, list[uuid.UUID]]:
-    """Run the handler and commit its writes with the run's result, in one transaction."""
+    """Run the handler outside any transaction, then commit what it staged with the run's
+    result; return the result and the outbox events to publish."""
     handler = runtime.tasks.get(task.task_kind)
     if handler is None:
         raise CodedError("internal_defect", f"No handler is registered for {task.task_kind}.")
+    context = TaskContext(
+        task=task,
+        secrets=runtime.secrets,
+        tenant_id=lease.tenant_id,
+        correlation_id=lease.correlation_id,
+        now=runtime.clock(),
+    )
+    result = await handler(context)
     with UnitOfWork(runtime.engine, lease.scope) as uow:
-        context = TaskContext(
-            task=task,
-            uow=uow,
-            secrets=runtime.secrets,
-            tenant_id=lease.tenant_id,
-            correlation_id=lease.correlation_id,
-            now=runtime.clock(),
-        )
-        result = await handler(context)
+        # Locks the run and checks the lease first, so a stale holder's writes never run.
         complete_run(
             uow.session,
             lease,
@@ -239,7 +249,21 @@ async def _execute(
             result_refs=result.result_refs,
             now=runtime.clock(),
         )
-    return result, context.outbox_event_ids
+        for apply in context._writes:
+            apply(uow)
+        outbox_event_ids = [
+            outbox_event_id
+            for event in context._events
+            for outbox_event_id in record_event(
+                uow.session,
+                event,
+                tenant_id=lease.tenant_id,
+                now=context.now,
+                parent_run_id=task.workflow_run_id,
+                correlation_id=lease.correlation_id,
+            )
+        ]
+    return result, outbox_event_ids
 
 
 def _report_failure(runtime: TaskRuntime, lease: Lease, error: CodedError) -> TaskRunOutcome:
