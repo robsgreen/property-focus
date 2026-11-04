@@ -253,10 +253,10 @@ class IdempotencyRecord(Base):
     result_id: Mapped[uuid.UUID | None]
     lease_expires_at: Mapped[datetime | None]
     # The key replays until this time; afterwards it admits a new request, and the repair
-    # task deletes the record.
-    expires_at: Mapped[datetime] = mapped_column(
-        index=True, server_default=text("now() + interval '24 hours'")
-    )
+    # task deletes the record. ``admit_run`` sets it from ``workflows.IDEMPOTENCY_TTL``, the
+    # one source of the TTL. Migration 0002's column default exists to backfill the records
+    # it found, so the model declares none.
+    expires_at: Mapped[datetime] = mapped_column(index=True)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 

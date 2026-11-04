@@ -6,7 +6,8 @@ enforces (see ``rls.sql``):
 - ``TenantScope``: a user acting in the tenant they own. Sees that tenant's private rows
   and workflow runs.
 - ``ServiceScope``: a background task coordinating work across tenants. Sees every
-  workflow run and no tenant-private rows.
+  workflow run, event, user and tenant, and no tenant-private rows except expired
+  idempotency records, which it may delete.
 
 The scope is set with ``SET LOCAL`` at the start of each transaction, so PostgreSQL clears
 it at commit or rollback and a pooled connection never carries it into the next one.

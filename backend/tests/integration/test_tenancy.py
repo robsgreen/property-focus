@@ -33,7 +33,13 @@ from property_focus.adapters.db.repositories import (
     TenantScope,
     UnitOfWork,
 )
-from property_focus.application.workflows import NewEvent, record_event, utc_now
+from property_focus.application.context import VerifiedIdentity, provision_tenant
+from property_focus.application.workflows import (
+    IDEMPOTENCY_TTL,
+    NewEvent,
+    record_event,
+    utc_now,
+)
 from property_focus.cli import FIXTURES_DIR, SEED_DATASETS, main
 from property_focus.config import Settings
 
@@ -46,7 +52,12 @@ def _seed_private_rows(engine: Engine, tenant: TenantScope) -> None:
     """Write one row of each tenant-private kind, and a workflow run, for ``tenant``."""
     with UnitOfWork(engine, tenant) as uow:
         uow.repository(IdempotencyRecord).add(
-            IdempotencyRecord(operation="add_property", idempotency_key="k1", request_digest="d")
+            IdempotencyRecord(
+                operation="add_property",
+                idempotency_key="k1",
+                request_digest="d",
+                expires_at=utc_now() + IDEMPOTENCY_TTL,
+            )
         )
         uow.repository(AuditEvent).add(
             AuditEvent(principal_user_id=tenant.user_id, action="create", target_type="test")
@@ -197,6 +208,31 @@ def test_account_provisioning_runs_through_a_pinned_security_definer_function(
     assert definer
     assert "search_path=pg_catalog, public, pg_temp" in config
     assert (public_execute, runtime_execute) == (False, True)
+
+
+def test_provisioning_stores_only_a_verified_email_and_replaces_it_when_it_changes(
+    runtime_engine: Engine,
+) -> None:
+    subject = f"subject-{uuid.uuid4()}"
+
+    def provision(email: str | None, verified: bool) -> tuple[str, bool]:
+        identity = VerifiedIdentity(
+            issuer=ISSUER, subject=subject, email=email, email_verified=verified
+        )
+        with runtime_engine.begin() as connection:
+            scope = provision_tenant(connection, identity)
+        with UnitOfWork(runtime_engine, scope) as uow:
+            stored = uow.session.execute(
+                select(User.email, User.email_verified).where(User.id == scope.user_id)
+            ).one()
+        return stored.email, stored.email_verified
+
+    assert provision(None, False) == ("", False)
+    assert provision("first@example.test", False) == ("", False)
+    assert provision("first@example.test", True) == ("first@example.test", True)
+    # A token without a verified email keeps the stored one.
+    assert provision(None, False) == ("first@example.test", True)
+    assert provision("second@example.test", True) == ("second@example.test", True)
 
 
 def test_runtime_role_cannot_write_rows_into_another_tenant(
@@ -371,7 +407,12 @@ def test_scoped_repository_stamps_the_scope_tenant_and_refuses_another(
     with UnitOfWork(runtime_engine, a) as uow:
         records = uow.repository(IdempotencyRecord)
         own = records.add(
-            IdempotencyRecord(operation="add_property", idempotency_key="k", request_digest="d")
+            IdempotencyRecord(
+                operation="add_property",
+                idempotency_key="k",
+                request_digest="d",
+                expires_at=utc_now() + IDEMPOTENCY_TTL,
+            )
         )
         with pytest.raises(ScopeError):
             records.add(
@@ -380,6 +421,7 @@ def test_scoped_repository_stamps_the_scope_tenant_and_refuses_another(
                     operation="add_property",
                     idempotency_key="k",
                     request_digest="d",
+                    expires_at=utc_now() + IDEMPOTENCY_TTL,
                 )
             )
     assert own.tenant_id == a.tenant_id

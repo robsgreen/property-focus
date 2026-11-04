@@ -25,7 +25,9 @@ Once the client is registered, it is always deleted afterwards (RFC 7592: ``DELE
 ``registration_client_uri`` with its ``registration_access_token``), whether or not the
 later checks pass, and that prints its own line. A failed delete fails the run; after a
 check that already failed, it is reported on standard error and the check's failure is the
-one raised.
+one raised. A ``201`` that fails the registration check itself (no ``cf-ray``, or no
+client ID, registration access token or client URI) has its client deleted at once, or,
+without the values that delete it, its client ID reported on standard error.
 
 Every response the checks read themselves, and every MCP response, must carry Cloudflare's
 ``cf-ray`` header and must not be a Cloudflare challenge page. A ``525`` (Cloudflare could not
@@ -140,10 +142,26 @@ class EdgeBrowser(Browser):
 
     def request(self, method: str, url: str, **options: Any) -> Response:
         response = super().request(method, url, **options)
-        expect_through_cloudflare(url, response.headers)
-        if response.status == _ORIGIN_HANDSHAKE_FAILED:
-            raise SmokeCheckError(f"{url}: {_ORIGIN_PULLS_HINT}")
+        expect_from_edge(url, response)
         return response
+
+
+def expect_from_edge(url: str, response: Response) -> None:
+    """``EdgeBrowser``'s check of one ``response`` to ``url``."""
+    expect_through_cloudflare(url, response.headers)
+    if response.status == _ORIGIN_HANDSHAKE_FAILED:
+        raise SmokeCheckError(f"{url}: {_ORIGIN_PULLS_HINT}")
+
+
+class _KeepingBrowser(Browser):
+    """A ``Browser`` that keeps its last response unchecked, for a caller that must read the
+    body before deciding whether the response passes."""
+
+    last: Response | None = None
+
+    def request(self, method: str, url: str, **options: Any) -> Response:
+        self.last = super().request(method, url, **options)
+        return self.last
 
 
 def edge_request(method: str, url: str, bearer: str | None = None) -> Response:
@@ -204,24 +222,59 @@ def sign_in(auth_url: str, email: str, password: str, *, client_id: str, redirec
 def register_mcp_client(auth_url: str) -> Registration:
     """Register a public loopback client anonymously, as a generic MCP client does.
 
-    Raises ``SmokeCheckError`` unless the realm answers ``201`` with the client ID and the
-    ``registration_access_token`` and ``registration_client_uri`` that delete it.
+    Raises ``SmokeCheckError`` unless the realm answers ``201``, through Cloudflare, with the
+    client ID and the ``registration_access_token`` and ``registration_client_uri`` that
+    delete it. When a ``201`` fails a later check, the client it created is deleted before
+    raising, or, without the values to delete it, its client ID is reported on standard
+    error (``_discard_registration``).
     """
     endpoint = f"{auth_url}/realms/{REALM}/clients-registrations/openid-connect"
+    browser = _KeepingBrowser()
+    # The body is read before the edge check, so a client created by a 201 that fails it is
+    # still known and can be deleted.
     registration = register_client(
-        endpoint, mcp_client_metadata(MCP_CLIENT_NAME, MCP_REDIRECT_URI), browser=EdgeBrowser()
+        endpoint, mcp_client_metadata(MCP_CLIENT_NAME, MCP_REDIRECT_URI), browser=browser
     )
-    expect(
-        registration.status == 201,
-        f"client registration: {registration.status} {str(registration.metadata)[:200]}",
-    )
-    missing = [
-        key
-        for key in ("client_id", "registration_access_token", "registration_client_uri")
-        if not registration.metadata.get(key)
-    ]
-    expect(not missing, f"client registration: the response has no {', '.join(missing)}")
+    try:
+        assert browser.last is not None
+        expect_from_edge(endpoint, browser.last)
+        expect(
+            registration.status == 201,
+            f"client registration: {registration.status} {str(registration.metadata)[:200]}",
+        )
+        missing = [key for key in _REGISTRATION_KEYS if not registration.metadata.get(key)]
+        expect(not missing, f"client registration: the response has no {', '.join(missing)}")
+    except BaseException:
+        if registration.status == 201:
+            _discard_registration(registration)
+        raise
     return registration
+
+
+# What a registration response must carry: the client ID, and what deletes it (RFC 7592).
+_REGISTRATION_KEYS = ("client_id", "registration_access_token", "registration_client_uri")
+
+
+def _discard_registration(registration: Registration) -> None:
+    """Delete the client a registration that failed its checks created, or, when that
+    cannot be done, report on standard error that it is left in the realm."""
+    client_id = registration.metadata.get("client_id") or "(no client_id in the response)"
+    if all(registration.metadata.get(key) for key in _REGISTRATION_KEYS[1:]):
+        try:
+            response = delete_registration(registration, browser=Browser())
+        except (OSError, httpx2.HTTPError) as error:
+            reason = f"{type(error).__name__}: {error}"
+        else:
+            if response.status == 204:
+                return
+            reason = f"its delete answered {response.status}"
+    else:
+        reason = "the response has no registration access token or client URI to delete it"
+    print(
+        f"smoke-dogfood: MCP client {client_id} was registered but is left in the realm "
+        f"({reason}); delete it as in docs/operations.md, Pruning registered MCP clients",
+        file=sys.stderr,
+    )
 
 
 def delete_mcp_client(registration: Registration) -> None:

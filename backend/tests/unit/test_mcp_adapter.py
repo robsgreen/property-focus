@@ -230,6 +230,57 @@ class TestTransportSecurity:
         assert "www-authenticate" not in unsigned.headers
         assert resolved == []
 
+    def test_mcp_with_a_trailing_slash_is_checked_too(
+        self, verifier: OidcVerifier, engine: Engine
+    ) -> None:
+        app = create_app(settings(), engine=engine, verifier=verifier)
+
+        with TestClient(app, base_url="http://localhost:8001") as client:
+            refused = client.post(
+                "/mcp/", json={}, headers={"Host": "attacker.example.test"}, follow_redirects=False
+            )
+
+        assert refused.status_code == 421
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"],
+    )
+    def test_metadata_answers_any_host_without_checking_a_token(
+        self,
+        verifier: OidcVerifier,
+        engine: Engine,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+    ) -> None:
+        # The image health check requests the metadata at 127.0.0.1, which dogfood's
+        # PF_MCP_ALLOWED_HOSTS (the public app host only) does not list.
+        resolved: list[Any] = []
+
+        def resolve(engine: Engine, identity: Any, **_: Any) -> ExecutionContext:
+            resolved.append(identity)
+            return CALLER
+
+        monkeypatch.setattr(oidc, "resolve_context", resolve)
+        public = settings(
+            mcp_public_url="https://app.example.test/mcp",
+            mcp_allowed_hosts="app.example.test",
+            mcp_allowed_origins="https://app.example.test",
+        )
+        app = create_app(public, engine=engine, verifier=verifier)
+
+        with TestClient(app, base_url="http://127.0.0.1:8001") as client:
+            anonymous = client.get(path)
+            signed = client.get(path, headers={"Authorization": f"Bearer {sign()}"})
+            mcp = client.post("/mcp", json={}, headers={"Authorization": f"Bearer {sign()}"})
+
+        assert anonymous.status_code == 200
+        assert anonymous.json()["resource"] == "https://app.example.test/mcp"
+        assert signed.status_code == 200
+        assert mcp.status_code == 421
+        # The metadata routes are public: a token sent to them is never checked.
+        assert resolved == []
+
 
 class TestLogging:
     def test_sdk_transport_logs_only_warnings_and_errors(

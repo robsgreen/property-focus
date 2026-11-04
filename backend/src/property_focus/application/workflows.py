@@ -338,7 +338,12 @@ def prune_idempotency_records(engine: Engine, *, now: datetime, batch_size: int 
         )
         deleted = uow.session.scalars(
             delete(IdempotencyRecord)
-            .where(IdempotencyRecord.id.in_(expired.scalar_subquery()))
+            .where(
+                IdempotencyRecord.id.in_(expired.scalar_subquery()),
+                # Repeated so a row replaced since the subquery read it is never deleted,
+                # whatever row security allows.
+                IdempotencyRecord.expires_at <= now,
+            )
             .returning(IdempotencyRecord.id)
         ).all()
         return len(deleted)

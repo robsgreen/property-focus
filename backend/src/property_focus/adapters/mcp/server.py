@@ -266,7 +266,7 @@ def create_app(
             Middleware(OpenTelemetryMiddleware),
             Middleware(_RequestScope),
             # Before the SDK's authentication middleware, so the token is never checked for a
-            # request from a host or origin the server does not serve.
+            # request from a host or origin the server does not serve, nor on any other path.
             Middleware(_TransportSecurity, settings=security),
             *protocol_app.user_middleware,
         ],
@@ -409,18 +409,31 @@ class _RequestScope:
 
 
 class _TransportSecurity:
-    """Refuses an HTTP request whose ``Host`` or ``Origin`` header ``settings`` do not allow
-    (``421`` and ``403``, as the SDK answers) before any later middleware runs."""
+    """Refuses a request to ``/mcp`` whose ``Host`` or ``Origin`` header ``settings`` do not
+    allow (``421`` and ``403``, as the SDK answers) before any later middleware runs.
+
+    Only ``/mcp`` (with or without a trailing slash) is checked, as the SDK checks only the
+    endpoint it serves: the public metadata routes answer any host, so the image's health
+    check can request them at ``127.0.0.1``. Every other path is unauthenticated, so its
+    ``Authorization`` header is dropped and no token is checked, nor a caller provisioned,
+    for a request that does not reach ``/mcp``.
+    """
 
     def __init__(self, app: ASGIApp, settings: TransportSecuritySettings) -> None:
         self.app = app
         self._checks = TransportSecurityMiddleware(settings)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            # Only the headers are checked here; the SDK checks the content type itself.
-            refusal = await self._checks.validate_request(Request(scope), is_post=False)
-            if refusal is not None:
-                await refusal(scope, receive, send)
-                return
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope["path"].rstrip("/") != MCP_PATH:
+            headers = [header for header in scope["headers"] if header[0] != b"authorization"]
+            await self.app({**scope, "headers": headers}, receive, send)
+            return
+        # Only the headers are checked here; the SDK checks the content type itself.
+        refusal = await self._checks.validate_request(Request(scope), is_post=False)
+        if refusal is not None:
+            await refusal(scope, receive, send)
+            return
         await self.app(scope, receive, send)
