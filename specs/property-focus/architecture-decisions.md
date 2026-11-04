@@ -1398,6 +1398,8 @@ D31 allows one or two initial implementations; the user chose two.
 
 **Amended 2026-11-02 (user):** see A6 (the official MCP Python SDK serves the MCP authorization and transport specifications).
 
+**Amended 2026-11-04 (user, owner review of PR #2):** MCP tokens carry their own audience (`property-focus-mcp`), separate from the web app's REST audience (`property-focus-api`). Each surface refuses the other's tokens, so a token issued to any self-registered MCP client cannot call the REST API.
+
 **Decision**
 
 MCP access is client-agnostic: any MCP client that supports the MCP authorization specification (OAuth) can connect. There are no client-specific integrations.
