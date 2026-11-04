@@ -312,6 +312,7 @@ def test_backend_services_trust_forwarded_headers_only_from_caddys_fixed_address
     assert ipaddress.ip_address(caddy_address) in ipaddress.ip_network(subnet)
     for name in ("api", "mcp"):
         assert services[name]["environment"]["FORWARDED_ALLOW_IPS"] == caddy_address, name
+    assert services["keycloak"]["environment"]["KC_PROXY_TRUSTED_ADDRESSES"] == caddy_address
     for name in ("api", "mcp", "keycloak"):
         assert "proxy" in services[name]["networks"], name
 

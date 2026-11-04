@@ -146,6 +146,8 @@ services:
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
+      # Trust X-Forwarded-* only from Caddy's fixed address on the proxy network.
+      KC_PROXY_TRUSTED_ADDRESSES: *caddy-address
       KC_BOOTSTRAP_ADMIN_USERNAME: ${PF_KEYCLOAK_ADMIN_USERNAME:?set PF_KEYCLOAK_ADMIN_USERNAME}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${PF_KEYCLOAK_ADMIN_PASSWORD:?set PF_KEYCLOAK_ADMIN_PASSWORD}
       # Values for the realm file's ${...} placeholders. deploy.sh hands these same values
