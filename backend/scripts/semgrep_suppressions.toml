@@ -1,0 +1,40 @@
+# Findings dropped from the Semgrep SARIF before it is reported or uploaded.
+# Each entry is one rule on one path. A match removes every result of that rule
+# in that file. oidc.py and pnpm-workspace.yaml are absent on purpose: those
+# findings stay visible.
+#
+# Checked with Semgrep 1.183.0 against p/python, p/owasp-top-ten, p/secrets,
+# p/github-actions, p/dockerfile, p/typescript, p/react and p/javascript.
+# These older community rules are not in those packs, so this scan does not
+# report them and they are not listed below. Running the upstream rule files
+# on their own matches only the lines named here, plus adapters/auth/oidc.py
+# for dynamic-urllib (that hit stays, via Bandit B310):
+# - python37-compatibility-importlib2 at
+#   backend/migrations/versions/0001_foundation.py:10
+#   (`from importlib.resources import files` on Python 3.13; the rule warns
+#   about Python older than 3.7)
+# - dynamic-urllib-use-detected at backend/scripts/keycloak_realm.py:187 and
+#   :211 and backend/scripts/compatibility_report.py:306 (operator scripts;
+#   the URL is the configured Keycloak or MiniStack base, not a request)
+# - ifs-tampering at infrastructure/docker/check-compose-version.sh:25
+#   (`local IFS=.` inside at_least, to split a version on dots)
+
+[[suppression]]
+rule = "python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text"
+path = "backend/migrations/versions/0001_foundation.py"
+reason = "The only hit is an f-string of the literals \"{}\" and \"[]\". Callers in this released migration pass those two values and nothing else."
+
+[[suppression]]
+rule = "python.jwt.security.unverified-jwt-decode.unverified-jwt-decode"
+path = "backend/src/property_focus/adapters/mcp/server.py"
+reason = "authenticate() has just verified this same token. The second decode only reads scope and exp for the MCP SDK."
+
+[[suppression]]
+rule = "dockerfile.security.missing-user.missing-user"
+path = "infrastructure/docker/keycloak.Dockerfile"
+reason = "The Keycloak 26.8.1 base image sets USER 1000. This Dockerfile never switches to root."
+
+[[suppression]]
+rule = "dockerfile.security.missing-user-entrypoint.missing-user-entrypoint"
+path = "infrastructure/docker/keycloak.Dockerfile"
+reason = "The Keycloak 26.8.1 base image sets USER 1000. This Dockerfile never switches to root."

@@ -69,7 +69,8 @@ publish steps join the bootstrap with the first ontology version (`ontology/v1.0
 | `make fe` | Web app lint, type check, unit tests and production build (`@property-focus/web`) |
 | `make infra` | CDK type check, assertion tests and synth for `infrastructure/cdk`; needs no AWS credentials |
 | `make deploy-identity ENV=dogfood` | Deploys only the Cognito identity stack to the allowlisted dogfood AWS account (live; needs approval and credentials) |
-| `make verify` | The full pull-request verification set: everything above except deployment, including `make be-int` (needs Docker and `.env`) |
+| `make verify` | The path-aware pull-request checks: everything above except deployment and the security scans, including `make be-int` (needs Docker and `.env`) |
+| `make scan` | Semgrep, Bandit (`backend/src`, medium and higher) and dependency audits (`uv export` of the lockfile through pip-audit, and `pnpm audit --audit-level high`). Needs uv, pnpm and network. Exits non-zero when a finding remains. Not part of `make verify` |
 | `make dev` | API on 127.0.0.1:8000, MCP on 127.0.0.1:8001, the web app on http://localhost:5173 and the scheduler, against the local Keycloak realm; refuses any `PF_ENVIRONMENT` but `development`. Needs the local services and a migrated database |
 | `docker compose --profile app up -d --build` | The same API, MCP adapter and scheduler as built images (`infrastructure/docker/backend.Dockerfile`), after a one-shot `migrate`; an alternative to `make dev` |
 | `make compatibility-local` | Exercises each AWS operation the application uses against the pinned MiniStack and regenerates `docs/compatibility.md` |
@@ -90,7 +91,12 @@ uv run pytest backend/tests/unit -q
 
 Pull requests run the same checks in GitHub Actions (`.github/workflows/ci.yml`), selected by
 the paths they change; the path filters are listed at the top of that file. A pull request
-that changes only `docs/**` or `specs/**` runs just the credential scan and `pnpm lint:md`.
+that changes only `docs/**` or `specs/**` runs the credential scan, `pnpm lint:md` and the
+security scans. `.github/workflows/security.yml` runs Semgrep, Bandit and the dependency
+audits on every pull request (the dependency audit also runs nightly, once that workflow
+is on the default branch). Findings are reported and do not fail the workflow while
+`SCAN_ENFORCE` in that file is `"false"`; set it to `"true"` to fail the job on findings.
+`make verify` does not run `make scan`.
 
 See `AGENTS.md` for module boundaries and contribution rules, and
 `docs/system/architecture.md` for how the system works.

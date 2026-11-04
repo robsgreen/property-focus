@@ -2,13 +2,20 @@
 # runs from the repository root.
 
 .PHONY: install check-compose check-layout be-check be-unit be-int be-replay generate-api \
-	check-generated fe infra deploy-identity verify dev smoke-dogfood compatibility-local
+	check-generated fe infra deploy-identity verify dev smoke-dogfood compatibility-local \
+	scan scan-semgrep scan-bandit scan-deps
 
 # This Makefile's directory, so its scripts are found even when it runs with -f from elsewhere.
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Files generated from the backend's REST schema; never edited by hand.
 GENERATED_API := frontend/src/api/openapi.json frontend/src/api/generated.ts
+
+# Scanner versions for `make scan`. Pinned so a laptop and CI run the same tools.
+SEMGREP_VERSION := 1.183.0
+BANDIT_VERSION := 1.9.2
+PIP_AUDIT_VERSION := 2.9.0
+SEMGREP_SARIF := build/semgrep.sarif
 
 # Loads the repository's .env, when there is one, into commands that read the PF_* environment.
 DOTENV := $(if $(wildcard .env),--env-file .env)
@@ -101,9 +108,66 @@ deploy-identity:
 	fi
 	pnpm --filter @property-focus/infra exec cdk deploy PropertyFocus-Identity-$(ENV) --exclusively --context environment=$(ENV)
 
-# Local pull-request verification: everything CI can run, regardless of the changed paths.
-# be-int needs Docker and a .env with the Keycloak admin values.
+# Local pull-request verification: the path-aware CI jobs, regardless of the changed paths.
+# be-int needs Docker and a .env with the Keycloak admin values. Security scans are
+# separate (`make scan`): the rule packs are large, and CI reports them without failing
+# the workflow until SCAN_ENFORCE is true.
 verify: install be-check be-unit be-int be-replay check-generated fe infra
+
+# Semgrep, Bandit and the dependency audits. Exits non-zero when a finding remains.
+# Needs uv, pnpm and network. Not a dependency of `verify`.
+scan:
+	@status=0; \
+	$(MAKE) scan-bandit || status=1; \
+	$(MAKE) scan-semgrep || status=1; \
+	$(MAKE) scan-deps || status=1; \
+	exit $$status
+
+# Registry packs for the languages in this repo. p/react and p/javascript cover the
+# React app and the JavaScript rules that also apply to TypeScript. .claude/ is excluded
+# on the command line so a project .semgrepignore does not replace Semgrep's defaults.
+scan-semgrep:
+	mkdir -p build
+	SEMGREP_SEND_METRICS=off uvx --python 3.13 --from semgrep==$(SEMGREP_VERSION) semgrep scan \
+		--metrics=off \
+		--disable-version-check \
+		--error \
+		--config p/python \
+		--config p/owasp-top-ten \
+		--config p/secrets \
+		--config p/github-actions \
+		--config p/dockerfile \
+		--config p/typescript \
+		--config p/react \
+		--config p/javascript \
+		--exclude .claude \
+		--sarif \
+		--output $(SEMGREP_SARIF) \
+		. ; \
+	code=$$?; \
+	if [ "$$code" -gt 1 ]; then exit "$$code"; fi; \
+	uv run --no-project --python 3.13 python backend/scripts/filter_semgrep_sarif.py $(SEMGREP_SARIF)
+
+# backend/src only, medium+ severity and confidence. Skips live in pyproject.toml.
+scan-bandit:
+	uvx --python 3.13 --from bandit==$(BANDIT_VERSION) bandit \
+		--configfile pyproject.toml \
+		--recursive backend/src \
+		--severity-level medium \
+		--confidence-level medium
+
+# uv export of the lockfile (every group, no local workspace packages) and pnpm audit.
+# pnpm's audit level is high: lower advisories still print in the summary.
+scan-deps:
+	@mkdir -p build
+	@status=0; \
+	uv export --frozen --all-packages --all-groups --no-emit-workspace --no-header --no-hashes \
+		--format requirements-txt --output-file build/requirements-audit.txt >/dev/null \
+		&& uvx --python 3.13 --from pip-audit==$(PIP_AUDIT_VERSION) pip-audit \
+			--requirement build/requirements-audit.txt --progress-spinner off \
+		|| status=1; \
+	pnpm audit --audit-level high || status=1; \
+	exit $$status
 
 # Local development stack (backend/scripts/dev.py): API on 127.0.0.1:8000, MCP on
 # 127.0.0.1:8001, Vite on 5173 and the scheduler, against the local Keycloak realm. Refuses

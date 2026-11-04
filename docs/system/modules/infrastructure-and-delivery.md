@@ -18,8 +18,8 @@ This module covers how the code runs outside a unit test: the local Compose serv
 | `infrastructure/dogfood/cloudflare-ips.txt`, `cloudflare-origin-ca.pem` | Cloudflare's published IP ranges (the one source for the firewall and Caddy's trusted proxies) and its public Origin CA roots |
 | `infrastructure/dogfood/otel-collector.yaml`, `scheduler.crontab` | Dogfood collector and schedule |
 | `infrastructure/cdk/` | CDK app `@property-focus/infra`: Cognito `IdentityStack` only |
-| `.github/workflows/ci.yml`, `deploy-dogfood.yml` | Pull-request checks; manual dogfood deploy |
-| `backend/scripts/smoke_dogfood.py`, `compatibility_report.py`, `check_fixture_secrets.py`, `check_boundaries.py`, `dev.py` | Supporting scripts |
+| `.github/workflows/ci.yml`, `security.yml`, `deploy-dogfood.yml` | Path-aware pull-request checks; Semgrep, Bandit and dependency audits; manual dogfood deploy |
+| `backend/scripts/smoke_dogfood.py`, `compatibility_report.py`, `check_fixture_secrets.py`, `check_boundaries.py`, `filter_semgrep_sarif.py`, `dev.py` | Supporting scripts |
 | `backend/tests/unit/test_runtime_manifests.py`, `test_dogfood_edge.py`, `test_repo_checks.py`, `test_compose_version_check.py`, `integration/test_ci_workflow.py` | Tests for the manifests, the Cloudflare edge configuration, repository checks, the Compose version check and CI path filters |
 
 ## Local services (`compose.yaml`)
@@ -102,6 +102,20 @@ The `changes` job maps each changed path to jobs; pushes to `main` and manual ru
 
 `test_ci_workflow.py` replays the path filter against sample changes. Every action is pinned by commit SHA with the release named in a comment.
 
+## Security scans (`security.yml`)
+
+`make scan` runs the same three checks locally and exits non-zero when a finding remains. It is not part of `make verify`: the rule packs are large. The workflow runs them on every pull request, not behind the path filter, and the dependency audit also on a nightly schedule (06:17 UTC). GitHub runs that schedule from the default branch, so it starts once this workflow is on `main`.
+
+| Check | What it runs |
+|---|---|
+| Semgrep | `p/python`, `p/owasp-top-ten`, `p/secrets`, `p/github-actions`, `p/dockerfile`, `p/typescript`, `p/react`, `p/javascript`, metrics off, `.claude/` excluded. Triaged false positives are removed by `backend/scripts/filter_semgrep_sarif.py` (`semgrep_suppressions.toml`) before the SARIF is uploaded for code scanning. The upload step has `security-events: write`; the other jobs do not. A fork pull request skips the upload. If code scanning is not enabled, the upload warns and the log still has the findings |
+| Bandit | `backend/src` at medium or higher severity and confidence. Skips for the triaged false positives are in the root `pyproject.toml`. `B310` is not skipped |
+| Dependencies | `uv export --frozen` of the lockfile through pip-audit, and `pnpm audit --audit-level high` |
+
+`SCAN_ENFORCE` at the top of `security.yml` is the one switch. While it is `"false"`, a scanner that finds something (or fails) does not fail the job. Set it to `"true"` to fail the job on a non-zero scanner exit. `make scan` is not gated by the switch: it exits non-zero when a finding remains.
+
+The pnpm supply-chain rules (`minimumReleaseAge`, `trustPolicy`, `blockExoticSubdeps` in `pnpm-workspace.yaml`) and `urllib.request.urlopen` in `adapters/auth/oidc.py` (Bandit `B310`) are reported. They are not in the suppression list.
+
 ## Repository checks
 
 - `make check-layout` fails on root `apps/`, `packages/`, `infra/` or `evals/`.
@@ -109,6 +123,7 @@ The `changes` job maps each changed path to jobs; pushes to `main` and manual ru
 - Scripts the unit tests run on a developer machine (`deploy.sh` up to its image build, the CI path filter) use only what macOS also has: BSD `paste`, `find` and `awk`, LibreSSL's `openssl` and bash 3.2. `test_dogfood_edge.py` runs `deploy.sh` with stand-ins that reject the GNU- and OpenSSL-only options (`paste` without an operand, `stat -c`, `openssl x509 -checkhost`).
 - `check_boundaries.py` enforces the layer import rules (see [AGENTS.md](../../../AGENTS.md)).
 - `check_fixture_secrets.py` scans committed files and `fixtures/` for credential patterns; it uses only the standard library.
+- `make scan` runs Semgrep, Bandit and the dependency audits described under Security scans. `make verify` does not call it.
 - `make compatibility-local` regenerates [compatibility](../../compatibility.md) from MiniStack runs.
 
 ## Related docs
