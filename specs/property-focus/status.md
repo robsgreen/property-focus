@@ -88,3 +88,8 @@ PR: https://github.com/robsgreen/property-focus/pull/2
 - 2026-11-03 17:06 - User's macOS make verify: 14 unit failures — BSD paste needs '-' (deploy.sh/tests), and Docker Compose on the Mac rejects configs.content (older Compose). Fix dispatched (revision push to PR #2).
 - 2026-11-03 17:37 - Revision push c8383e9 to PR #2: macOS portability (paste -, stat, LibreSSL checkhost, bash 3.2) + Compose >= 2.27.2 check; make verify green
 - 2026-11-03 23:54 - Owner (bot-posted) review on PR #2: 14 findings kept; user: fix all, #7 separate MCP audience. 3 coders dispatched (deploy/edge, backend data, auth/MCP).
+- 2026-11-04 00:12 - Backend data fixes 511c2f8 (#6 RLS+definer fn, #8 short task tx, #9 outbox claim, #14 idempotency TTL); contract-helper patch handed to auth/MCP coder
+- 2026-11-04 00:14 - Deploy/edge fixes 2dc5426 (#1 auto-rollback, #2 main-only, #3 build/deploy/smoke jobs, #4 staged env file, #5 AOP, #13 Caddy-only forwarded trust); user setup changes: repo variables, dogfood-smoke env, AOP toggle. Follow-up: KC_PROXY_TRUSTED_ADDRESSES.
+- 2026-11-04 00:28 - Owner-review fixes complete (511c2f8, 2dc5426, 4154f28, 2553a57, 7c5b57f, ff6eec9); make verify running; scoped re-review dispatched: 2 seats x 3 modules (opus/opus)
+- 2026-11-04 00:35 - Re-review cycle 2 done (13 new findings incl. 2 critical); Fix Once dispatched to 2 coders; specs fixed cb2bd30
+- 2026-11-04 00:49 - Revision pushed to PR #2 (cf09bbc); PR body updated; make verify green (549/212/33/15)

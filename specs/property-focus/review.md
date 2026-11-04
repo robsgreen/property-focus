@@ -195,3 +195,22 @@ Post-panel review: 2026-11-03 23:51 kept=14 refuted=0 outOfScope=0
 - backend/src/property_focus/adapters/mcp/server.py:24 — low — Host/Origin check after token verification
 - infrastructure/dogfood/compose.yaml:189 — low — FORWARDED_ALLOW_IPS "*"
 - backend/src/property_focus/application/workflows.py:257 — low — idempotency records never expire
+
+### Post-panel fixes — scoped re-review (cycle 2), 2026-11-04
+Panel: A=claude/opus, B=claude/opus; 3 modules x 2 seats. Range c8383e9..ff6eec9.
+Verdicts: 2,4,6,7,8,9,10,11,14 fixed; 1,3,5,12,13 partly (regressions below).
+New findings (kept, Fix Once dispatched):
+- backend/src/property_focus/adapters/mcp/server.py:411 — critical — pre-auth Host check covers /.well-known, MCP HEALTHCHECK gets 421 on dogfood (A, repro by TestClient)
+- infrastructure/dogfood/compose.yaml:352 — critical — proxy network has no ip_range; Caddy's fixed .2 taken by Keycloak (A+B, crossLens; repro on Docker by orchestrator)
+- .github/workflows/deploy-dogfood.yml:70 — high — deploy runs scripts from build-job artifact (A+B, crossLens)
+- infrastructure/dogfood/deploy.sh:385 — medium — auto-rollback runs with new env file, previous lost (A)
+- infrastructure/dogfood/deploy.sh:260 — medium — rollback to pre-proxy / pre-audience-split release breaks sign-in/MCP (B auth + B deploy, crossLens)
+- specs/property-focus/master-plan.md:175 — medium — stale audience lines (B) — fixed by orchestrator cb2bd30
+- infrastructure/dogfood/deploy.sh:263 — low — redeploy of current commit stops everything on failure (B)
+- docs/operations.md:97, Caddyfile:12 — low — doc drift (B)
+- backend/scripts/smoke_dogfood.py:204 — low — client leaked if registration response invalid (A)
+- backend/src/property_focus/application/workflows.py:339 — low — prune outer DELETE lacks expiry condition (A)
+- backend/src/property_focus/adapters/db/repositories.py:8 — low — ServiceScope docstring drift (A+B)
+- backend/src/property_focus/adapters/db/models.py:258 — low — TTL duplicated (B)
+- migrations/0002:122 — low — email-update branch untested (B)
+User decisions raised: global vs zone-level AOP; TaskContext read access for handlers (carried to the phase adding the first handler).
