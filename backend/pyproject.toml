@@ -2,7 +2,7 @@
 name = "property-focus"
 version = "0.1.0"
 description = "Property Focus backend: API, MCP adapter, scheduled tasks and workers (one modular monolith)."
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic>=1.20,<2",
     "boto3>=1.43,<2",

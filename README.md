@@ -70,7 +70,7 @@ publish steps join the bootstrap with the first ontology version (`ontology/v1.0
 | `make infra` | CDK type check, assertion tests and synth for `infrastructure/cdk`; needs no AWS credentials |
 | `make deploy-identity ENV=dogfood` | Deploys only the Cognito identity stack to the allowlisted dogfood AWS account (live; needs approval and credentials) |
 | `make verify` | The full pull-request verification set: everything above except deployment, including `make be-int` (needs Docker and `.env`) |
-| `make dev` | API on 127.0.0.1:8000, MCP on 127.0.0.1:8001, the web app on http://localhost:5173 and the scheduler, against the local Keycloak realm; refuses any `PF_ENVIRONMENT` but `development`. Needs the local services and a migrated database |
+| `make dev` | API on 127.0.0.1:8000, MCP on 127.0.0.1:8001, the web app on http://localhost:5173 and the scheduler, against the local Keycloak realm, after migrating the local database to the latest schema; refuses any `PF_ENVIRONMENT` but `development`. Needs the local services |
 | `docker compose --profile app up -d --build` | The same API, MCP adapter and scheduler as built images (`infrastructure/docker/backend.Dockerfile`), after a one-shot `migrate`; an alternative to `make dev` |
 | `make compatibility-local` | Exercises each AWS operation the application uses against the pinned MiniStack and regenerates `docs/compatibility.md` |
 | `make smoke-dogfood` | Checks the deployed dogfood environment from outside its host, through Cloudflare (live; needs approval); see `docs/operations.md` |

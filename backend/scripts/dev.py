@@ -6,6 +6,10 @@
 - the scheduler daemon over ``infrastructure/dogfood/scheduler.crontab``, the same entries
   dogfood runs.
 
+Before starting them it runs ``property-focus migrate``, which upgrades the local database
+to the latest schema (a no-op when it is current), and stops with that command's status if
+it fails.
+
 All four use the process environment (``make dev`` loads ``.env``); the identity provider is
 the local Keycloak realm unless ``PF_OIDC_ISSUER`` says otherwise. The command refuses any
 configuration that is not ``PF_ENVIRONMENT=development`` and exits 2 without starting
@@ -13,7 +17,7 @@ anything. Otherwise it runs until one of the processes exits or it receives SIGI
 SIGTERM, then stops the rest and exits with the first non-zero status, or 0.
 
 Usage: ``uv run --package property-focus python backend/scripts/dev.py``. The local services
-(``docker compose up -d postgres keycloak mailpit otel``) and a migrated database come first.
+(``docker compose up -d postgres keycloak mailpit otel``) come first.
 """
 
 import signal
@@ -36,6 +40,9 @@ PROCESSES: dict[str, tuple[str, ...]] = {
     "scheduler": (*_CLI, "schedule", "--crontab", str(CRONTAB)),
 }
 
+# Upgrades the local database before anything that reads it starts.
+MIGRATE: tuple[str, ...] = (*_CLI, "migrate")
+
 # How long a process may take to exit after SIGTERM before it is killed.
 _STOP_TIMEOUT_SECONDS = 10
 
@@ -46,6 +53,15 @@ def main() -> int:
     except (ConfigurationError, DevelopmentOnlyError) as error:
         print(f"make dev: {error}", file=sys.stderr)
         return 2
+
+    migrated = subprocess.run(MIGRATE, cwd=REPOSITORY_ROOT, stdin=subprocess.DEVNULL, check=False)
+    if migrated.returncode != 0:
+        print(
+            f"make dev: migrate exited with status {migrated.returncode}; "
+            "is Postgres running (docker compose up -d --wait postgres)?",
+            file=sys.stderr,
+        )
+        return migrated.returncode
 
     stop = threading.Event()
     for stop_signal in (signal.SIGTERM, signal.SIGINT):
