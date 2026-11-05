@@ -1,6 +1,6 @@
 # Foundation Ready Gate
 
-> **Status: OPEN, not closed.** The local evidence (0.12.2, 0.12.4, 0.12.6, 0.12.7) is recorded below and passes. The gate closes only after the items marked **PENDING** are done: 0.12.1 (clean-clone bootstrap on macOS arm64, plus the CI Linux x86_64 log), 0.12.3 (recorded path-aware CI run; needs a push), 0.12.5 (`make smoke-dogfood` through Cloudflare; needs the Cloudflare setup, the Mailgun domain, the deployment secrets and a dogfood deployment), 0.12.8 (Cloudflare dashboard settings, `firewall.sh` and `deploy.sh` preflight output) Each needs the user's action or explicit approval.
+> **Status: OPEN, not closed.** The local evidence (0.12.2, 0.12.4, 0.12.6, 0.12.7) is recorded below and passes. The gate closes only after the items marked **PENDING** are done: 0.12.3 (recorded path-aware CI run; needs a push), 0.12.5 (`make smoke-dogfood` through Cloudflare; needs the Cloudflare setup, the Mailgun domain, the deployment secrets and a dogfood deployment), and 0.12.8 (Cloudflare dashboard settings, `firewall.sh` and `deploy.sh` preflight output). Each needs the user's action or explicit approval.
 
 - **Task:** 0.12 in `specs/property-focus/tasks/task-spec.md`; plan section "Foundation ready gate" artifacts in `specs/property-focus/master-plan.md`.
 - **Recorded:** 2026-11-02, branch `sdlc/property-focus-p0`. **Latest run (0.12.7):** `make verify` and the verbose backend run were rerun at `e8f8982`, after Tasks 0.15 (PyJWT `PyJWKClient`), 0.16 (official MCP SDK adapter) and 0.17 (Cloudflare edge) and the tests added for them; the commit that records them changes only this gate. The two log files now hold that run. **Earlier runs:** `make verify` and the verbose backend run were rerun at `71694cd`, the final code commit after the review fixes (`c734f96`, `6c2fdf5`, `bd1eae5`, `c188e47`, `71694cd`); the commit that records them changes only documentation and this gate. The metadata logs (0.12.6) were recorded at `3eae973`, before the review fixes. The PKCE smoke (0.12.4) was first recorded at `3eae973` and rerun at `dcd06fd`, after the review fixes changed sign-in and sign-out, with a sign-out check added.
@@ -11,8 +11,8 @@
 
 | Plan artifact | Evidence | Result |
 |---|---|---|
-| Clean-bootstrap log, macOS arm64 | [0.12.1](#0121-clean-clone-bootstrap--pending) | **PENDING (user)** |
-| Clean-bootstrap log, CI Linux x86_64 | [0.12.1](#0121-clean-clone-bootstrap--pending) | **PENDING (first CI run; needs a push)** |
+| Clean-bootstrap log, macOS arm64 | [0.12.1](#0121-clean-clone-bootstrap--passed) | Passed (user, 2026-11-05) |
+| Clean-bootstrap log, CI Linux x86_64 | [0.12.1](#0121-clean-clone-bootstrap--passed) | Passed (CI `bootstrap` job) |
 | `make verify` | [make-verify.log](foundation-ready/make-verify.log) | pass, exit 0 at `e8f8982` |
 | Every backend test by name | [backend-tests-verbose.log](foundation-ready/backend-tests-verbose.log) | 627 passed, 0 failed, 0 skipped at `e8f8982` |
 | Two-account isolation and account-provisioning tests | `test_tenancy.py`, [table](#named-suites) | 19 / 19 |
@@ -32,9 +32,12 @@
 | Compatibility inventory | [`docs/compatibility.md`](../../../docs/compatibility.md) | attached |
 | Keycloak mechanisms (0.13.3, 0.5.7) and option C findings (0.14) | [0.12.6](#0126-compatibility-inventory-and-keycloak-mechanisms) | attached |
 
-## 0.12.1 Clean-clone bootstrap — PENDING
+## 0.12.1 Clean-clone bootstrap — PASSED
 
-**PENDING — requires user action.** No macOS arm64 machine is available to the agent, and the CI log needs a push.
+**Passed.**
+
+- macOS arm64: the user ran the commands below on their Mac and reported on 2026-11-05 that `make verify` passes. That was after upgrading Docker Desktop to Compose 2.27.2 or later; the first attempt failed on Compose v2.7.0, which led to the minimum-version check and the macOS fixes in commit c8383e9. The user reported the result; the log itself is not attached.
+- CI Linux x86_64: the `bootstrap` job passed on [run 41749606743](https://github.com/robsgreen/property-focus/actions/runs/41749606743/job/126311191310) (commit cf09bbc), and on every later push to PR #2.
 
 macOS arm64 (Apple silicon, Docker Desktop running, Node 22 and uv 0.11 installed). From an empty directory:
 
