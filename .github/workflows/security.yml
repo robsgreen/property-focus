@@ -1,0 +1,112 @@
+# Security scans on every pull request. The dependency audit also runs nightly.
+# Findings are reported and do not fail the workflow while SCAN_ENFORCE is
+# "false". Set that one variable to "true" to fail the job when a scanner exits
+# non-zero (a finding, or the scanner itself failing). `make verify` does not
+# run these checks; `make scan` does, and it exits non-zero when a finding remains.
+#
+# Semgrep uploads SARIF for code scanning annotations. That step is skipped for
+# a pull request opened from a fork (the token cannot write security events) and
+# never fails the job: the log still has the findings when code scanning is off.
+# The nightly schedule runs only once this file is on the default branch.
+#
+# Actions are pinned by commit; the comment names the release each commit is.
+# Triggers are pull_request and the nightly schedule. Not pull_request_target.
+name: security
+
+on:
+  pull_request:
+  schedule:
+    # 06:17 UTC. Dependency audit only; the code scans stay on pull requests.
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+env:
+  # The one switch. "false" reports findings without failing the job.
+  SCAN_ENFORCE: "false"
+
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semgrep:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Scan mode
+        run: echo "SCAN_ENFORCE=${SCAN_ENFORCE}"
+
+      - name: Semgrep
+        continue-on-error: ${{ env.SCAN_ENFORCE != 'true' }}
+        run: make scan-semgrep
+
+      - name: Upload Semgrep SARIF
+        if: >-
+          always() &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          hashFiles('build/semgrep.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          sarif_file: build/semgrep.sarif
+          category: semgrep
+
+  bandit:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Scan mode
+        run: echo "SCAN_ENFORCE=${SCAN_ENFORCE}"
+
+      - name: Bandit
+        continue-on-error: ${{ env.SCAN_ENFORCE != 'true' }}
+        run: make scan-bandit
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Scan mode
+        run: echo "SCAN_ENFORCE=${SCAN_ENFORCE}"
+
+      - name: Dependency audit
+        continue-on-error: ${{ env.SCAN_ENFORCE != 'true' }}
+        run: make scan-deps
