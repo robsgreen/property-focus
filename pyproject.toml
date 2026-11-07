@@ -1,0 +1,49 @@
+# uv workspace root. The root is virtual: it holds shared tooling settings and the
+# development dependency group; the deployable Python code lives in workspace members.
+
+[tool.uv.workspace]
+members = ["backend"]
+
+[dependency-groups]
+dev = [
+    "httpx2==2.16.0",
+    "mypy>=2.4,<3",
+    "pytest>=9.2,<10",
+    "ruff>=0.17,<0.18",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["frontend", "infrastructure"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # import order
+    "N",   # pep8 naming
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "SIM", # simplify
+    "PT",  # pytest style
+    "RUF", # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["property_focus"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+minversion = "9.2"
+testpaths = ["backend/tests"]
+# Shared test helpers import as `support.*`.
+pythonpath = ["backend/tests"]
+addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config", "-ra"]
+xfail_strict = true

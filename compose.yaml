@@ -1,0 +1,239 @@
+# Local development services. Start what you need, for example:
+#   docker compose up -d postgres keycloak ministack mailpit otel
+# The backend images (api, mcp, scheduler and the one-shot migrate) are in the `app`
+# profile, an alternative to `make dev` that runs the built images instead:
+#   docker compose --profile app up -d --build
+# Every port binds to 127.0.0.1 only. Nothing here is a production setting.
+
+name: property-focus
+
+# Settings of every backend container: the local database, the local Keycloak realm as
+# issuer (the `iss` browsers see) with its key set fetched inside Compose, and the collector.
+x-backend-environment: &backend-environment
+  PF_ENVIRONMENT: development
+  PF_DATABASE_URL: postgresql+psycopg://pf_runtime@postgres:5432/property_focus
+  PF_MIGRATION_DATABASE_URL: postgresql+psycopg://pf_migrator@postgres:5432/property_focus
+  PF_OIDC_ISSUER: http://localhost:8080/realms/property-focus
+  PF_OIDC_JWKS_URL: http://keycloak:8080/realms/property-focus/protocol/openid-connect/certs
+  PF_OTLP_ENDPOINT: http://otel:4318
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: infrastructure/docker/backend.Dockerfile
+
+services:
+  postgres:
+    image: postgres:17.11-alpine3.24
+    environment:
+      # Local only: the server accepts connections without passwords, so no credential
+      # lives in this file. Deployed databases use password or IAM authentication, and
+      # the application reads those passwords through the secret provider.
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_USER: postgres
+    configs:
+      - source: postgres-bootstrap
+        target: /docker-entrypoint-initdb.d/10-bootstrap.sql
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "--username=pf_migrator", "--dbname=property_focus"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot step: gives Keycloak its own `keycloak` role and database on the local server.
+  # Idempotent, so it also adds them to a data volume created before Keycloak existed.
+  keycloak-db-init:
+    image: postgres:17.11-alpine3.24
+    depends_on:
+      postgres:
+        condition: service_healthy
+    configs:
+      - source: keycloak-db-init
+        target: /keycloak-db-init.sql
+    command:
+      - psql
+      - --host=postgres
+      - --username=postgres
+      - --dbname=postgres
+      - --set=ON_ERROR_STOP=1
+      - --file=/keycloak-db-init.sql
+    restart: "no"
+
+  # Identity provider for development and tests (A4), with the `property-focus` realm
+  # imported from Git on first start. Keycloak skips the import for a realm that already
+  # exists in its database; to load realm file changes locally, drop the realm (or the
+  # `keycloak` database) and restart. The admin console is http://localhost:8080/admin/.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1@sha256:3f3c5f8e03c614774b4bd9173b88391fefa4153bfc010d8012d59ad825377332
+    depends_on:
+      keycloak-db-init:
+        condition: service_completed_successfully
+    # Refuse to start without a bootstrap admin, rather than starting one nobody can manage.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        if [ -z "$$KC_BOOTSTRAP_ADMIN_USERNAME" ] || [ -z "$$KC_BOOTSTRAP_ADMIN_PASSWORD" ]; then
+          echo "keycloak: set PF_KEYCLOAK_ADMIN_USERNAME and PF_KEYCLOAK_ADMIN_PASSWORD in .env" >&2
+          exit 1
+        fi
+        exec /opt/keycloak/bin/kc.sh start-dev --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      # Local only: the server trusts local connections, so the role needs no password.
+      KC_DB_USERNAME: keycloak
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${PF_KEYCLOAK_ADMIN_USERNAME:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${PF_KEYCLOAK_ADMIN_PASSWORD:-}
+      # Values for the realm file's ${...} placeholders.
+      PF_WEB_ORIGIN: ${PF_WEB_ORIGIN:-http://localhost:5173}
+      PF_KEYCLOAK_MAX_CLIENTS: ${PF_KEYCLOAK_MAX_CLIENTS:-100}
+      PF_KEYCLOAK_SMTP_HOST: mailpit
+      PF_KEYCLOAK_SMTP_PORT: "1025"
+      PF_KEYCLOAK_SMTP_FROM: no-reply@property-focus.localhost
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./infrastructure/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # The image has no HTTP client, so bash asks the management port directly.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 30
+
+  # AWS API emulator (D19). Pinned by digest; docs/compatibility.md records which
+  # operations it is trusted for.
+  ministack:
+    image: ministackorg/ministack:1.5.35@sha256:ba06991f4d43671c76cb5303f6de227d332e368afb1beffef751205db7074e6a
+    ports:
+      - "127.0.0.1:4566:4566"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Mail sink: SMTP on 1025, web UI and API on 8025.
+  mailpit:
+    image: axllent/mailpit:v1.33.0
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # OpenTelemetry collector with the image's default configuration: OTLP gRPC on 4317 and
+  # HTTP on 4318, printed by the debug exporter.
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    healthcheck:
+      # The image is distroless (no shell or HTTP client), so the check runs the collector
+      # binary itself: it passes while the container runs and its configuration is valid.
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otelcol-contrib/config.yaml"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot step: upgrades the local database to the latest schema.
+  migrate:
+    profiles: [app]
+    build:
+      <<: *backend-build
+      target: task
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *backend-environment
+    command: [migrate]
+    restart: "no"
+
+  api:
+    profiles: [app]
+    build:
+      <<: *backend-build
+      target: api
+    depends_on: &app-dependencies
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    environment: *backend-environment
+    command: [python, -m, property_focus.cli, serve, api, --host, 0.0.0.0]
+    init: true
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  mcp:
+    profiles: [app]
+    build:
+      <<: *backend-build
+      target: mcp
+    depends_on: *app-dependencies
+    environment:
+      <<: *backend-environment
+      # The published port as the host's clients reach it (the development defaults).
+      PF_MCP_PUBLIC_URL: http://localhost:8001/mcp
+      PF_MCP_ALLOWED_HOSTS: localhost:8001,127.0.0.1:8001
+      PF_MCP_ALLOWED_ORIGINS: http://localhost:8001,http://127.0.0.1:8001
+    command: [python, -m, property_focus.cli, serve, mcp, --host, 0.0.0.0]
+    init: true
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  # Starts the infrastructure/dogfood/scheduler.crontab entries (baked into the image).
+  # `init` reaps the task processes they launch.
+  scheduler:
+    profiles: [app]
+    build:
+      <<: *backend-build
+      target: scheduler
+    depends_on: *app-dependencies
+    environment: *backend-environment
+    command: [python, -m, property_focus.cli, schedule, --crontab, /app/scheduler.crontab]
+    init: true
+
+configs:
+  # Runs once, when the data volume is first initialised. pf_migrator is the migration
+  # owner: it owns the database and every table, and it creates the runtime, maintenance
+  # and backup roles in the first migration. Deployed databases create it the same way,
+  # with a password, as their one administrator step.
+  postgres-bootstrap:
+    content: |
+      CREATE ROLE pf_migrator LOGIN CREATEDB CREATEROLE;
+      CREATE DATABASE property_focus OWNER pf_migrator;
+
+  # Run by keycloak-db-init on every start; creates only what is missing.
+  keycloak-db-init:
+    content: |
+      SELECT 'CREATE ROLE keycloak LOGIN'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak')
+      \gexec
+      SELECT 'CREATE DATABASE keycloak OWNER keycloak'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')
+      \gexec
+
+volumes:
+  postgres-data:

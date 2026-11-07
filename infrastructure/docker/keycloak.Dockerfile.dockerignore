@@ -1,0 +1,3 @@
+# Build context of keycloak.Dockerfile: only the realm file.
+*
+!infrastructure/keycloak/realm-property-focus.json

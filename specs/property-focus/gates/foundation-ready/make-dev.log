@@ -1,0 +1,37 @@
+# make dev for the 0.12.4 smoke, 2026-11-02, at dcd06fd; stopped with SIGINT to its process group
+# PF_DATABASE_URL and PF_MIGRATION_DATABASE_URL named a new database (pf_smoke_0124) migrated from 0001 at this commit; dropped afterwards
+uv run --env-file .env --package property-focus python backend/scripts/dev.py
+
+> @property-focus/web@0.0.0 dev <repo>/frontend
+> vite
+
+
+  VITE v8.3.5  ready in 302 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+{"timestamp": "2026-11-02T14:13:47.389+00:00", "level": "INFO", "logger": "property_focus.runtime.scheduler", "message": "scheduler: started with 2 entries", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:13:47.453+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Started server process [27394]", "trace_id": null, "span_id": null, "correlation_id": null, "color_message": "Started server process [\u001b[36m%d\u001b[0m]"}
+{"timestamp": "2026-11-02T14:13:47.454+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application startup.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:13:47.498+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Started server process [27393]", "trace_id": null, "span_id": null, "correlation_id": null, "color_message": "Started server process [\u001b[36m%d\u001b[0m]"}
+{"timestamp": "2026-11-02T14:13:47.498+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application startup.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:13:47.506+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Application startup complete.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:13:47.507+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)", "trace_id": null, "span_id": null, "correlation_id": null, "color_message": "Uvicorn running on \u001b[1m%s://%s:%d\u001b[0m (Press CTRL+C to quit)"}
+{"timestamp": "2026-11-02T14:13:47.559+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Application startup complete.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:13:47.559+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)", "trace_id": null, "span_id": null, "correlation_id": null, "color_message": "Uvicorn running on \u001b[1m%s://%s:%d\u001b[0m (Press CTRL+C to quit)"}
+{"timestamp": "2026-11-02T14:13:55.662+00:00", "level": "INFO", "logger": "property_focus.adapters.rest.app", "message": "GET /v1/workflow-runs/6d2e30d2-72b0-466c-837b-8a3040953146 answered 404", "trace_id": "2edd8d391012ea07501d2bab736d56ea", "span_id": "f93cbfa97419d5dd", "correlation_id": "731e9518b4ce4a3fac5d937700fb18b6", "http_method": "GET", "http_path": "/v1/workflow-runs/6d2e30d2-72b0-466c-837b-8a3040953146", "http_status": 404, "duration_ms": 113.3}
+outbox-sweep: 0 handled
+{"timestamp": "2026-11-02T14:14:07.571+00:00", "level": "INFO", "logger": "property_focus.adapters.rest.app", "message": "GET /v1/workflow-runs/5a057926-6fc1-4d5a-af4b-374492a3c94d answered 404", "trace_id": "4168c2f8c45b2d0eb101e2d07cf822db", "span_id": "662900d929acaf8a", "correlation_id": "a1356b2fc0ee43ffac15c1626602b745", "http_method": "GET", "http_path": "/v1/workflow-runs/5a057926-6fc1-4d5a-af4b-374492a3c94d", "http_status": 404, "duration_ms": 17.6}
+{"timestamp": "2026-11-02T14:14:14.443+00:00", "level": "INFO", "logger": "property_focus.runtime.scheduler", "message": "scheduler: python -m property_focus.cli run-task outbox-sweep exited with status 0", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.443+00:00", "level": "INFO", "logger": "property_focus.runtime.scheduler", "message": "scheduler: stopped", "trace_id": null, "span_id": null, "correlation_id": null}
+<repo>/frontend:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @property-focus/web@0.0.0 dev: `vite`
+Command failed with signal "SIGTERM"
+{"timestamp": "2026-11-02T14:14:14.501+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Shutting down", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.518+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Shutting down", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.602+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application shutdown.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.603+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Application shutdown complete.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.603+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Finished server process [27393]", "trace_id": null, "span_id": null, "correlation_id": null, "color_message": "Finished server process [\u001b[36m%d\u001b[0m]"}
+{"timestamp": "2026-11-02T14:14:14.619+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application shutdown.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.620+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Application shutdown complete.", "trace_id": null, "span_id": null, "correlation_id": null}
+{"timestamp": "2026-11-02T14:14:14.620+00:00", "level": "INFO", "logger": "uvicorn.error", "message": "Finished server process [27394]", "trace_id": null, "span_id": null, "correlation_id": null, "color_message": "Finished server process [\u001b[36m%d\u001b[0m]"}

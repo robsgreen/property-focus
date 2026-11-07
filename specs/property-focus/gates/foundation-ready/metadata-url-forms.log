@@ -1,0 +1,5 @@
+# 0.12.6 / 0.5.7 metadata URL forms Keycloak serves natively for the realm issuer http://localhost:8080/realms/property-focus, 2026-11-02T06:35:15Z
+/.well-known/oauth-authorization-server/realms/property-focus  HTTP 200
+/.well-known/openid-configuration/realms/property-focus  HTTP 404
+/realms/property-focus/.well-known/openid-configuration  HTTP 200
+/realms/property-focus/.well-known/oauth-authorization-server  HTTP 200

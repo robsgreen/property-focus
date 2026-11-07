@@ -1,0 +1,6 @@
+packages:
+  - frontend
+  - infrastructure/cdk
+
+# Refuse to install with a Node version outside the root `engines` range.
+engineStrict: true

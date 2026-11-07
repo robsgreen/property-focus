@@ -1,0 +1,368 @@
+# DigitalOcean dogfood: the whole runtime on one host, deployed by deploy.sh (see
+# docs/operations.md). Standalone; it does not extend the root compose.yaml.
+#
+# Values come from the deployment-injected environment file (D49), which deploy.sh and the
+# operators' commands both pass with --env-file, so Compose's parser is the only one that
+# reads it (docs/operations.md gives the format: a value holding $, a quote, #, a backslash
+# or a space is single-quoted); none is committed. Compose
+# refuses to start while a required value, such as a public hostname or the SMTP relay, is
+# missing.
+#
+# Every service runs with no-new-privileges and without Linux capabilities except the few
+# it is given back below; Keycloak, Postgres and OpenObserve have memory limits.
+#
+# No service loops over queues or mailboxes (D26): the scheduler starts one short-lived
+# `run-task <kind>` process per scheduler.crontab entry, and the API, MCP adapter and
+# scheduler launch on-demand tasks as processes. backend/tests/unit/test_runtime_manifests.py
+# enforces this. Only Caddy listens publicly, behind Cloudflare; Keycloak's HTTP and
+# management ports and the observability UI bind to the host's loopback interface, for SSH
+# tunnels.
+
+name: property-focus-dogfood
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+# Defense in depth for every service: no privilege gain through setuid binaries or file
+# capabilities, and no Linux capabilities unless the service adds one back.
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+# Caddy's fixed address on the proxy network, the only network it joins: the one address the
+# API, the MCP adapter (FORWARDED_ALLOW_IPS) and Keycloak (KC_PROXY_TRUSTED_ADDRESSES) trust
+# forwarded headers from. It lies in the subnet under networks.proxy but outside its ip_range,
+# the part Docker hands out to the other members, so a member that starts first cannot take
+# it. Change the subnet, ip_range and this address together (docs/operations.md, The host).
+x-caddy-address: &caddy-address 10.250.10.2
+
+x-backend-build: &backend-build
+  context: ../..
+  dockerfile: infrastructure/docker/backend.Dockerfile
+
+# Settings of the API, MCP and scheduler containers and of the tasks they launch. The
+# runtime role's password is the database_password secret of the deployment provider.
+x-backend-environment: &backend-environment
+  PF_ENVIRONMENT: dogfood
+  PF_DATABASE_URL: postgresql+psycopg://pf_runtime@postgres:5432/property_focus
+  PF_DATABASE_PASSWORD: ${PF_DATABASE_PASSWORD:?set PF_DATABASE_PASSWORD}
+  PF_OIDC_ISSUER: https://${PF_DOGFOOD_AUTH_HOST:?set PF_DOGFOOD_AUTH_HOST to the public hostname of sign-in}/realms/property-focus
+  PF_OTLP_ENDPOINT: http://otel-collector:4318
+
+services:
+  postgres:
+    <<: *hardening
+    # The image's entry point prepares the data directory as root, then drops to `postgres`.
+    cap_add: [CHOWN, DAC_READ_SEARCH, FOWNER, SETGID, SETUID]
+    mem_limit: 1g
+    image: postgres:17.11-alpine3.24@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PF_POSTGRES_PASSWORD:?set PF_POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "--username=postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+
+  # One-shot administrator step, run by deploy.sh on every deploy: creates the migration
+  # owner, the application database, the runtime role and Keycloak's own role and database
+  # where missing, and sets their passwords from the environment (so rotation is a redeploy).
+  db-init:
+    <<: *hardening
+    image: postgres:17.11-alpine3.24@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+    profiles: [tasks]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${PF_POSTGRES_PASSWORD:?set PF_POSTGRES_PASSWORD}
+      MIGRATOR_PASSWORD: ${PF_MIGRATION_DATABASE_PASSWORD:?set PF_MIGRATION_DATABASE_PASSWORD}
+      RUNTIME_PASSWORD: ${PF_DATABASE_PASSWORD:?set PF_DATABASE_PASSWORD}
+      KEYCLOAK_PASSWORD: ${PF_KEYCLOAK_DB_PASSWORD:?set PF_KEYCLOAK_DB_PASSWORD}
+    configs:
+      - source: db-init
+        target: /db-init.sql
+    command:
+      - psql
+      - --host=postgres
+      - --username=postgres
+      - --dbname=postgres
+      - --quiet
+      - --set=ON_ERROR_STOP=1
+      - --file=/db-init.sql
+    restart: "no"
+    logging: *logging
+
+  # One-shot: upgrades the schema as the migration owner. deploy.sh runs it as the one
+  # controlled migration task of a deploy, before the new application images start.
+  migrate:
+    <<: *hardening
+    build:
+      <<: *backend-build
+      target: task
+    image: property-focus-task:${PF_IMAGE_TAG:?set PF_IMAGE_TAG}
+    profiles: [tasks]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *backend-environment
+      PF_MIGRATION_DATABASE_URL: postgresql+psycopg://pf_migrator@postgres:5432/property_focus
+      PF_MIGRATION_DATABASE_PASSWORD: ${PF_MIGRATION_DATABASE_PASSWORD:?set PF_MIGRATION_DATABASE_PASSWORD}
+    command: [migrate]
+    restart: "no"
+    logging: *logging
+
+  # The identity provider (A4). Imports the realm baked into the image on first start;
+  # deploy.sh reconciles later realm file changes with backend/scripts/keycloak_realm.py.
+  # The public reaches it only through Caddy on PF_DOGFOOD_AUTH_HOST; operators reach the
+  # admin console at http://localhost:8080/admin/ through an SSH tunnel.
+  keycloak:
+    <<: *hardening
+    mem_limit: 1536m
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/keycloak.Dockerfile
+    image: property-focus-keycloak:${PF_IMAGE_TAG:?set PF_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: [start, --optimized, --import-realm]
+    environment:
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${PF_KEYCLOAK_DB_PASSWORD:?set PF_KEYCLOAK_DB_PASSWORD}
+      KC_HOSTNAME: https://${PF_DOGFOOD_AUTH_HOST:?set PF_DOGFOOD_AUTH_HOST to the public hostname of sign-in}
+      KC_HOSTNAME_ADMIN: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      # Trust X-Forwarded-* only from Caddy's fixed address on the proxy network.
+      KC_PROXY_TRUSTED_ADDRESSES: *caddy-address
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${PF_KEYCLOAK_ADMIN_USERNAME:?set PF_KEYCLOAK_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${PF_KEYCLOAK_ADMIN_PASSWORD:?set PF_KEYCLOAK_ADMIN_PASSWORD}
+      # Values for the realm file's ${...} placeholders. deploy.sh hands these same values
+      # to keycloak_realm.py, so the import and every later apply agree.
+      PF_WEB_ORIGIN: https://${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}
+      PF_KEYCLOAK_MAX_CLIENTS: ${PF_KEYCLOAK_MAX_CLIENTS:-100}
+      PF_KEYCLOAK_SMTP_HOST: ${PF_KEYCLOAK_SMTP_HOST:?set PF_KEYCLOAK_SMTP_HOST to the outbound mail relay}
+      PF_KEYCLOAK_SMTP_PORT: ${PF_KEYCLOAK_SMTP_PORT:?set PF_KEYCLOAK_SMTP_PORT to the mail relay port}
+      PF_KEYCLOAK_SMTP_FROM: ${PF_KEYCLOAK_SMTP_FROM:?set PF_KEYCLOAK_SMTP_FROM to the sender address of sign-in email}
+      PF_KEYCLOAK_SMTP_AUTH: ${PF_KEYCLOAK_SMTP_AUTH:-true}
+      PF_KEYCLOAK_SMTP_USER: ${PF_KEYCLOAK_SMTP_USER:-}
+      PF_KEYCLOAK_SMTP_PASSWORD: ${PF_KEYCLOAK_SMTP_PASSWORD:-}
+      PF_KEYCLOAK_SMTP_STARTTLS: ${PF_KEYCLOAK_SMTP_STARTTLS:-true}
+      PF_KEYCLOAK_SMTP_SSL: ${PF_KEYCLOAK_SMTP_SSL:-false}
+    networks: [default, proxy]
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      # The image has no HTTP client, so bash asks the management port directly.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 30
+    logging: *logging
+
+  # The REST API. Only Caddy reaches it (no published port), and uvicorn trusts the forwarded
+  # scheme and client address only from Caddy's fixed address.
+  api:
+    <<: *hardening
+    build:
+      <<: *backend-build
+      target: api
+    image: property-focus-api:${PF_IMAGE_TAG:?set PF_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *backend-environment
+      FORWARDED_ALLOW_IPS: *caddy-address
+    networks: [default, proxy]
+    command: [python, -m, property_focus.cli, serve, api, --host, 0.0.0.0]
+    init: true
+    logging: *logging
+
+  # The MCP adapter, reached the same way. It serves only requests for the app hostname,
+  # which Caddy passes through as Host, and names its public URL in the protected-resource
+  # metadata and the 401 challenge.
+  mcp:
+    <<: *hardening
+    build:
+      <<: *backend-build
+      target: mcp
+    image: property-focus-mcp:${PF_IMAGE_TAG:?set PF_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *backend-environment
+      FORWARDED_ALLOW_IPS: *caddy-address
+      PF_MCP_PUBLIC_URL: https://${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}/mcp
+      PF_MCP_ALLOWED_HOSTS: ${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}
+      PF_MCP_ALLOWED_ORIGINS: https://${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}
+    networks: [default, proxy]
+    command: [python, -m, property_focus.cli, serve, mcp, --host, 0.0.0.0]
+    init: true
+    logging: *logging
+
+  # Starts the scheduler.crontab entries baked into the image; `init` reaps the task
+  # processes they launch.
+  scheduler:
+    <<: *hardening
+    build:
+      <<: *backend-build
+      target: scheduler
+    image: property-focus-scheduler:${PF_IMAGE_TAG:?set PF_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *backend-environment
+    command: [python, -m, property_focus.cli, schedule, --crontab, /app/scheduler.crontab]
+    init: true
+    logging: *logging
+
+  # TLS termination and routing (Caddyfile) behind Cloudflare. Serves the web app built into
+  # this release's frontend/dist. deploy.sh recreates it on every deploy and rollback, because
+  # a running container never rereads its single-file Caddyfile mount.
+  caddy:
+    <<: *hardening
+    # Binds ports 80 and 443, and reads the origin key, which belongs to the deploy user with
+    # mode 600.
+    cap_add: [NET_BIND_SERVICE, DAC_READ_SEARCH]
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    restart: unless-stopped
+    depends_on:
+      - api
+      - mcp
+      - keycloak
+    environment:
+      PF_DOGFOOD_APP_HOST: ${PF_DOGFOOD_APP_HOST:?set PF_DOGFOOD_APP_HOST to the public hostname of the app}
+      PF_DOGFOOD_AUTH_HOST: ${PF_DOGFOOD_AUTH_HOST:?set PF_DOGFOOD_AUTH_HOST to the public hostname of sign-in}
+      # The proxies whose client-IP headers Caddy trusts, space-separated: the ranges of
+      # cloudflare-ips.txt, which deploy.sh and the operators' dogfood_compose pass in.
+      PF_CLOUDFLARE_IP_RANGES: ${PF_CLOUDFLARE_IP_RANGES:?set PF_CLOUDFLARE_IP_RANGES from infrastructure/dogfood/cloudflare-ips.txt}
+    # TCP only: Cloudflare reaches the origin over HTTP/1.1 and HTTP/2, never HTTP/3. The host
+    # firewall (firewall.sh) admits these ports only from Cloudflare's ranges.
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      proxy:
+        ipv4_address: *caddy-address
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Cloudflare's Authenticated Origin Pulls CA, which issues the client certificate
+      # Cloudflare presents.
+      - ./cloudflare-origin-pull-ca.pem:/etc/caddy/cloudflare-origin-pull-ca.pem:ro
+      # The Cloudflare Origin CA certificate and key, written by the deploy workflow, and
+      # deploy.sh's health-check client certificate.
+      - /etc/property-focus/origin:/etc/caddy/origin:ro
+      - ../../frontend/dist:/srv/web:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging: *logging
+
+  # Receives the services' OTLP traces and metrics and forwards them (otel-collector.yaml).
+  otel-collector:
+    <<: *hardening
+    image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
+    restart: unless-stopped
+    depends_on:
+      - observability
+    environment:
+      PF_OBSERVABILITY_ADMIN_EMAIL: ${PF_OBSERVABILITY_ADMIN_EMAIL:?set PF_OBSERVABILITY_ADMIN_EMAIL}
+      PF_OBSERVABILITY_ADMIN_PASSWORD: ${PF_OBSERVABILITY_ADMIN_PASSWORD:?set PF_OBSERVABILITY_ADMIN_PASSWORD}
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    healthcheck:
+      # Distroless image: the collector binary validates its own configuration.
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otelcol-contrib/config.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *logging
+
+  # The self-hosted observability stack (OpenObserve: traces, metrics and their UI), at
+  # http://localhost:5080 through an SSH tunnel.
+  observability:
+    <<: *hardening
+    mem_limit: 1g
+    image: public.ecr.aws/zinclabs/openobserve:v1.1.2@sha256:4a154849432f75c4fb024de32fe34163c02406c905dab22bf8d213d2e3386392
+    restart: unless-stopped
+    environment:
+      ZO_ROOT_USER_EMAIL: ${PF_OBSERVABILITY_ADMIN_EMAIL:?set PF_OBSERVABILITY_ADMIN_EMAIL}
+      ZO_ROOT_USER_PASSWORD: ${PF_OBSERVABILITY_ADMIN_PASSWORD:?set PF_OBSERVABILITY_ADMIN_PASSWORD}
+      ZO_DATA_DIR: /data
+      ZO_TELEMETRY: "false"
+    ports:
+      - "127.0.0.1:5080:5080"
+    volumes:
+      - observability-data:/data
+    logging: *logging
+
+configs:
+  db-init:
+    content: |
+      -- Passwords come from the container environment, never from this file.
+      \getenv migrator_pw MIGRATOR_PASSWORD
+      \getenv runtime_pw RUNTIME_PASSWORD
+      \getenv keycloak_pw KEYCLOAK_PASSWORD
+      SELECT 'CREATE ROLE pf_migrator LOGIN CREATEROLE'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pf_migrator')
+      \gexec
+      ALTER ROLE pf_migrator PASSWORD :'migrator_pw';
+      SELECT 'CREATE DATABASE property_focus OWNER pf_migrator'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'property_focus')
+      \gexec
+      -- The same attributes migration 0001 gives the role when it creates it.
+      SELECT 'CREATE ROLE pf_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pf_runtime')
+      \gexec
+      ALTER ROLE pf_runtime PASSWORD :'runtime_pw';
+      SELECT 'CREATE ROLE keycloak LOGIN'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keycloak')
+      \gexec
+      ALTER ROLE keycloak PASSWORD :'keycloak_pw';
+      SELECT 'CREATE DATABASE keycloak OWNER keycloak'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloak')
+      \gexec
+
+# Caddy reaches the API, the MCP adapter and Keycloak over `proxy` only, from its fixed
+# address; every other service talks over `default`. Docker gives the other members, which
+# start before Caddy, addresses from ip_range only (10.250.10.9 to .14), never Caddy's. Docker
+# cannot change an existing network's IPAM, so deploy.sh refuses to run while the host's
+# `proxy` network differs from this definition (docs/operations.md, The host).
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: 10.250.10.0/28
+          ip_range: 10.250.10.8/29
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
+  observability-data:

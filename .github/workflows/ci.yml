@@ -1,0 +1,396 @@
+# Pull-request checks (D48), path-aware: the `changes` job maps each changed path to the
+# check jobs that cover it (its case block is the path filter list), and each check job runs
+# only when selected. A path outside the listed directories (root tooling, lockfiles, this
+# file) selects every job; pushes to main and manual runs also check everything. The secret
+# scan runs on every pull request, so one that changes only docs/** or specs/** runs just
+# the secret scan and the markdown lint. Every check job installs from the committed
+# lockfiles first (`make install`), so a manifest change without its lockfile update fails.
+# Actions are pinned by commit; the comment names the release each commit is.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      integration: ${{ steps.filter.outputs.integration }}
+      replay: ${{ steps.filter.outputs.replay }}
+      generation: ${{ steps.filter.outputs.generation }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      cdk: ${{ steps.filter.outputs.cdk }}
+      images: ${{ steps.filter.outputs.images }}
+      bootstrap: ${{ steps.filter.outputs.bootstrap }}
+      markdown: ${{ steps.filter.outputs.markdown }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select jobs from the changed paths
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          all_jobs=(backend integration replay generation frontend cdk images bootstrap markdown)
+          # The selected jobs, space-separated: no associative array, because the integration
+          # tests also run this script with macOS's bash 3.2.
+          selected=" "
+          select_jobs() { selected="$selected$* "; }
+
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # --no-renames lists both sides of a move, so moving a file out of a path
+            # still runs that path's jobs.
+            changed=$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")
+          else
+            changed=""
+            select_jobs "${all_jobs[@]}"
+          fi
+
+          while IFS= read -r path; do
+            case "$path" in
+              "") ;;
+              backend/*) select_jobs backend integration replay generation images bootstrap ;;
+              frontend/*) select_jobs frontend generation ;;
+              infrastructure/keycloak/*) select_jobs integration images bootstrap ;;
+              # Backend unit tests check the images and dogfood runtime manifests, and the
+              # integration tests scan the dogfood files for client-specific code.
+              infrastructure/docker/* | infrastructure/dogfood/*) select_jobs backend integration images ;;
+              infrastructure/cdk/*) select_jobs cdk ;;
+              ontology/* | fixtures/*) select_jobs backend replay bootstrap ;;
+              docs/* | specs/*) select_jobs markdown ;;
+              *) select_jobs "${all_jobs[@]}" ;;
+            esac
+          done <<< "$changed"
+
+          printf 'Changed files:\n%s\n\nSelected jobs:\n' "${changed:-(not a pull request: all)}"
+          for job in "${all_jobs[@]}"; do
+            case "$selected" in
+              *" $job "*) echo "$job=true" ;;
+              *) echo "$job=false" ;;
+            esac | tee -a "$GITHUB_OUTPUT"
+          done
+
+  # Committed files and every file under fixtures/ (recorded email, pages and evidence),
+  # on every pull request. The scanner uses only the Python standard library.
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Scan for credentials
+        run: uv run --no-project --python 3.13 python backend/scripts/check_fixture_secrets.py
+
+  markdown:
+    needs: changes
+    if: needs.changes.outputs.markdown == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Markdown lint (/.markdownlint-cli2.yaml)
+        run: pnpm lint:md
+
+  backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install from lockfiles
+        run: make install
+
+      - name: Lint, format check, type check, boundaries and credential scan
+        run: make be-check
+
+      - name: Unit tests
+        run: make be-unit
+
+  integration:
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install from lockfiles
+        run: make install
+
+      # The template's local Keycloak admin values serve this throwaway runner.
+      - name: Local configuration
+        run: cp .env.example .env
+
+      # Starts Postgres, Keycloak (with the realm import), MiniStack, Mailpit and OTel and
+      # waits for their health checks, Keycloak's included, before the tests run.
+      - name: Integration and contract tests
+        run: make be-int
+
+      - name: Compose service logs
+        if: failure()
+        run: docker compose logs --no-color
+
+  replay:
+    needs: changes
+    if: needs.changes.outputs.replay == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install from lockfiles
+        run: make install
+
+      - name: Replay and golden-set tests
+        run: make be-replay
+
+  generation:
+    needs: changes
+    if: needs.changes.outputs.generation == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install from lockfiles
+        run: make install
+
+      - name: OpenAPI and RTK Query generation check
+        run: make check-generated
+
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install from lockfiles
+        run: make install
+
+      - name: Lint, type check, unit tests and build
+        run: make fe
+
+  cdk:
+    needs: changes
+    if: needs.changes.outputs.cdk == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm through Corepack
+        run: corepack enable
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Install from lockfiles
+        run: make install
+
+      - name: CDK tests and synth
+        run: make infra
+
+  # Builds every image the dogfood deploy builds (each backend target and Keycloak) and
+  # checks that the dogfood Compose file resolves, with placeholder values for the settings
+  # the host's environment file supplies. Pushes and runs nothing.
+  images:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build the backend image targets
+        run: |
+          for target in task api mcp scheduler; do
+            docker build --file infrastructure/docker/backend.Dockerfile --target "$target" \
+              --tag "property-focus-$target:ci" .
+          done
+
+      - name: Build the Keycloak image
+        run: docker build --file infrastructure/docker/keycloak.Dockerfile --tag property-focus-keycloak:ci .
+
+      - name: Validate the dogfood Compose file
+        env:
+          PF_IMAGE_TAG: ci
+          PF_DOGFOOD_APP_HOST: app.example.test
+          PF_DOGFOOD_AUTH_HOST: auth.example.test
+          PF_POSTGRES_PASSWORD: placeholder
+          PF_MIGRATION_DATABASE_PASSWORD: placeholder
+          PF_DATABASE_PASSWORD: placeholder
+          PF_KEYCLOAK_DB_PASSWORD: placeholder
+          PF_KEYCLOAK_ADMIN_USERNAME: placeholder
+          PF_KEYCLOAK_ADMIN_PASSWORD: placeholder
+          PF_KEYCLOAK_SMTP_HOST: smtp.example.test
+          PF_KEYCLOAK_SMTP_PORT: "587"
+          PF_KEYCLOAK_SMTP_FROM: no-reply@example.test
+          PF_OBSERVABILITY_ADMIN_EMAIL: ops@example.test
+          PF_OBSERVABILITY_ADMIN_PASSWORD: placeholder
+          PF_CLOUDFLARE_IP_RANGES: 192.0.2.0/24 2001:db8::/32
+        run: docker compose --file infrastructure/dogfood/compose.yaml --profile tasks config --quiet
+
+  # The plan's clean bootstrap on Linux x86_64: install, local services, migrate an empty
+  # database and seed synthetic data, with no private credentials.
+  bootstrap:
+    needs: changes
+    if: needs.changes.outputs.bootstrap == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # `uv run` reads the copied .env, as a developer's shell would after `cp`.
+      UV_ENV_FILE: .env
+    steps:
+      - name: Require Linux x86_64
+        run: |
+          uname -sm
+          [ "$(uname -sm)" = "Linux x86_64" ]
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.x"
+
+      - name: Bootstrap
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          uv sync --all-packages --frozen
+          cp .env.example .env
+          docker compose up -d --wait postgres keycloak ministack mailpit otel
+          uv run --package property-focus python -m property_focus.cli migrate
+
+      # The ontology commands join the bootstrap with the first ontology version.
+      - name: Load and publish ontology 1.0.0
+        if: hashFiles('ontology/v1.0.0/**') != ''
+        run: |
+          uv run --package property-focus python -m property_focus.cli ontology load ontology/v1.0.0
+          uv run --package property-focus python -m property_focus.cli ontology publish 1.0.0
+
+      - name: Seed synthetic data
+        run: uv run --package property-focus python -m property_focus.cli seed --dataset synthetic
+
+      - name: Compose service logs
+        if: failure()
+        run: docker compose logs --no-color

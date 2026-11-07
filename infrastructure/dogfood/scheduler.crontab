@@ -1,0 +1,8 @@
+# Dogfood scheduler (runtime/scheduler.py), also used by `make dev`. Times are UTC.
+# Every entry starts one short-lived `run-task <kind>` process for a kind registered in
+# backend/src/property_focus/runtime/scheduled.py; nothing here loops or waits for work.
+# backend/tests/unit/test_runtime_manifests.py enforces both rules.
+#
+# min  hour  day  month  weekday  command
+*      *     *    *      *        python -m property_focus.cli run-task outbox-sweep
+*/5    *     *    *      *        python -m property_focus.cli run-task repair
