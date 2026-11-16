@@ -40,6 +40,18 @@ strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
 
+# Bandit (`make scan-bandit`) reports medium and high severity at medium confidence
+# or higher. These skips are the false positives in backend/src. B310 is not
+# skipped: urllib.request.urlopen in adapters/auth/oidc.py stays a finding.
+# B602 (shell=True) is not skipped.
+[tool.bandit]
+skips = [
+    "B101", # assert used to narrow a type, not as a security check
+    "B105", # the only hit compares secret_provider to the provider name "aws"
+    "B404", # subprocess is imported to spawn an argv list
+    "B603", # Popen of an argv list, with the shell left off
+]
+
 [tool.pytest.ini_options]
 minversion = "9.2"
 testpaths = ["backend/tests"]
